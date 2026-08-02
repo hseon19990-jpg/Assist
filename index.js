@@ -93,7 +93,7 @@ app.post('/update-bot', async (req, res) => {
 
     } catch (error) {
         console.error(error);
-        res.status(500.json({ error: error.message }));
+        res.status(500).json({ error: error.message }); // تم تصحيح الأقواس هنا
     }
 });
 
