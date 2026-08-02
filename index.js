@@ -6,9 +6,9 @@ const path        = require('path');
 // ─── Config ───────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OWNER_ID  = parseInt(process.env.TELEGRAM_OWNER_ID, 10);
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const GROQ_KEY = process.env.GROQ_API_KEY;
 
-['TELEGRAM_BOT_TOKEN','TELEGRAM_OWNER_ID','GEMINI_API_KEY']
+['TELEGRAM_BOT_TOKEN','TELEGRAM_OWNER_ID','GROQ_API_KEY']
   .forEach(k => { if (!process.env[k]) throw new Error(`❌ المتغير ${k} مطلوب`); });
 
 // ─── Persistent state (saved to state.json) ───────────────────────────────────
@@ -80,22 +80,26 @@ async function ghPushFile(filePath, contentBuffer, commitMsg, sha) {
   return data;
 }
 
-// ─── Gemini helper ────────────────────────────────────────────────────────────
+// ─── Groq helper ─────────────────────────────────────────────────────────────
 async function geminiChat(systemPrompt, userMessage) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`;
-  const res = await fetch(url, {
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method : 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body   : JSON.stringify({
-      contents: [{
-        parts: [{ text: `${systemPrompt}\n\n${userMessage}` }]
-      }],
-      generationConfig: { temperature: 0.2 }
+    headers: {
+      'Authorization': `Bearer ${GROQ_KEY}`,
+      'Content-Type' : 'application/json',
+    },
+    body: JSON.stringify({
+      model   : 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userMessage  },
+      ],
+      temperature: 0.2,
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || `Gemini error ${res.status}`);
-  return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  if (!res.ok) throw new Error(data.error?.message || `Groq error ${res.status}`);
+  return data.choices?.[0]?.message?.content?.trim() || '';
 }
 
 // ─── Detect input type ────────────────────────────────────────────────────────
