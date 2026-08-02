@@ -127,32 +127,65 @@ ${fileTree.join('\n')}
   return JSON.parse(res.data.choices[0].message.content);
 }
 
+/**
+ * مصحح تلقائي: يصلح أخطاء الكود الشائعة التي يكتبها الذكاء الاصطناعي
+ */
+function sanitizeCode(code) {
+  // 1. إزالة markdown code fences إذا أضافها الـ AI
+  code = code.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+
+  // 2. تصحيح template literals: أي string فيها ${...} يجب أن تكون backticks
+  // نمط: 'نص ${var} نص' أو "نص ${var} نص" → `نص ${var} نص`
+  code = code.replace(
+    /(['"])((?:[^'"\\]|\\.)*?\$\{(?:[^}]|\{[^}]*\})*\}(?:[^'"\\]|\\.)*?)\1/g,
+    (match, quote, inner) => `\`${inner}\``
+  );
+
+  // 3. تصحيح multiline strings التي تحتوي على ${...}
+  code = code.replace(
+    /'((?:[^'\\]|\\.|\n)*?\$\{(?:[^}]|\{[^}]*\})*\}(?:[^'\\]|\\.|\n)*?)'/g,
+    (match, inner) => `\`${inner}\``
+  );
+  code = code.replace(
+    /"((?:[^"\\]|\\.|\n)*?\$\{(?:[^"\\]|\\.|\n)*?\}(?:[^"\\]|\\.|\n)*?)"/g,
+    (match, inner) => `\`${inner}\``
+  );
+
+  return code;
+}
+
 async function generateFileContent(instruction, filePath, existingContent) {
+  const isJs = filePath.endsWith('.js') || filePath.endsWith('.ts') || filePath.endsWith('.jsx') || filePath.endsWith('.tsx');
+
+  const systemMsg = isJs
+    ? `أنت مطور Node.js خبير. أعطِ الكود فقط بدون شرح أو markdown code fences.
+قواعد صارمة جداً:
+- استخدم backtick (\`) للـ template literals التي فيها \${...} — وليس single quote أو double quote أبداً
+- مثال صحيح: const x = \`hello \${name}\`;
+- مثال خاطئ: const x = 'hello \${name}';
+- حافظ على كل backtick موجود في الكود الأصلي كما هو`
+    : 'أنت مطور خبير. أعطِ المحتوى فقط بدون شرح أو markdown.';
+
   const prompt = existingContent
-    ? `الملف الحالي (${filePath}):\n\`\`\`\n${existingContent}\n\`\`\`\n\nالتعديل المطلوب: ${instruction}\n\nأعطني الملف الكامل بعد التعديل فقط، بدون شرح أو markdown.`
-    : `أنشئ ملف "${filePath}" بناءً على: ${instruction}\n\nأعطني المحتوى فقط بدون شرح أو markdown.`;
+    ? `الملف الحالي (${filePath}):\n${existingContent}\n\n---\nالتعديل المطلوب: ${instruction}\n\nأعطني الملف الكامل بعد التعديل فقط.`
+    : `أنشئ ملف "${filePath}" بناءً على: ${instruction}\n\nأعطني المحتوى فقط.`;
 
   const res = await axios.post(
     'https://api.groq.com/openai/v1/chat/completions',
     {
       model: 'llama-3.3-70b-versatile',
       messages: [
-        {
-          role: 'system',
-          content: 'أنت مطور Node.js خبير. أعطِ الكود فقط بدون شرح أو markdown. مهم جداً: استخدم دائماً backticks (`) للـ template literals وليس single quotes. حافظ على جميع backticks الموجودة في الكود.',
-        },
+        { role: 'system', content: systemMsg },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.2,
+      temperature: 0.1,
     },
-    {
-      headers: {
-        Authorization: `Bearer ${GROQ_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    }
+    { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
   );
-  return res.data.choices[0].message.content.trim();
+
+  const raw = res.data.choices[0].message.content.trim();
+  // تطبيق المصحح التلقائي دائماً على ملفات JS/TS
+  return isJs ? sanitizeCode(raw) : raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
 }
 
 // ============================================================
