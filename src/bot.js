@@ -1,3 +1,4 @@
+```javascript
 /**
  * بوت تيليجرام الذكي لتعديل GitHub
  * يستخدم Groq AI لفهم الطلبات وتنفيذها مباشرة
@@ -160,11 +161,12 @@ async function generateFileContent(instruction, filePath, existingContent) {
 // ============================================================
 
 const bot = new Telegraf(BOT_TOKEN);
+let admins = [OWNER_ID];
 
 // حماية: فقط المالك يمكنه استخدام البوت
 bot.use(async (ctx, next) => {
   const uid = ctx.from?.id;
-  if (OWNER_ID && uid !== OWNER_ID) {
+  if (!admins.includes(uid)) {
     return ctx.reply('🚫 هذا البوت خاص.');
   }
   return next();
@@ -197,7 +199,8 @@ bot.help(ctx => ctx.replyWithMarkdown(`*دليل الاستخدام:*
 • \`أضف Docker support للمشروع\`
 
 */start* — الرسالة الرئيسية
-*/repo* — معلومات المستودع`));
+*/repo* — معلومات المستودع
+*/admin* — أضف مسؤول`));
 
 bot.command('repo', async ctx => {
   try {
@@ -218,6 +221,19 @@ bot.command('repo', async ctx => {
   } catch (e) {
     ctx.reply(`❌ خطأ في جلب معلومات المستودع: ${e.message}`);
   }
+});
+
+bot.command('admin', async ctx => {
+  const uid = ctx.from?.id;
+  if (uid !== OWNER_ID) {
+    return ctx.reply('🚫 فقط المالك يمكنه إضافة مسؤولين جدد.');
+  }
+  const newAdmin = ctx.message.text.split(' ')[1];
+  if (!newAdmin) {
+    return ctx.reply('👉 يرجى ذكر معرف المستخدم الجديد.');
+  }
+  admins.push(parseInt(newAdmin));
+  ctx.reply(`👋 تمت إضافة المستخدم ${newAdmin} كمسؤول.`);
 });
 
 // الرسائل الرئيسية
@@ -375,3 +391,4 @@ bot.on('text', async ctx => {
 });
 
 module.exports = bot;
+```
