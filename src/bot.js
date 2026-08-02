@@ -1,4 +1,3 @@
-```javascript
 /**
  * بوت تيليجرام الذكي لتعديل GitHub
  * يستخدم Groq AI لفهم الطلبات وتنفيذها مباشرة
@@ -140,7 +139,7 @@ async function generateFileContent(instruction, filePath, existingContent) {
       messages: [
         {
           role: 'system',
-          content: 'أنت مطور خبير. أعطِ الكود أو المحتوى فقط بدون أي نص إضافي أو backticks.',
+          content: 'أنت مطور Node.js خبير. أعطِ الكود فقط بدون شرح أو markdown. مهم جداً: استخدم دائماً backticks (`) للـ template literals وليس single quotes. حافظ على جميع backticks الموجودة في الكود.',
         },
         { role: 'user', content: prompt },
       ],
@@ -391,4 +390,3 @@ bot.on('text', async ctx => {
 });
 
 module.exports = bot;
-```
