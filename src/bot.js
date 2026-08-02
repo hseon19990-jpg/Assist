@@ -521,10 +521,17 @@ bot.on('text', async ctx => {
           const existing = await readFile(op.file_path);
           const isUpdate = op.action === 'update' || !!existing;
 
+          // إذا لم يكن هناك محتوى جاهز أو طُلب توليد محتوى → ولّد دائماً
+          const shouldGenerate = analysis.needs_content_generation || !op.content_instruction;
+
           let content;
-          if (analysis.needs_content_generation) {
+          if (shouldGenerate) {
+            if (!op.content_instruction && !existing) {
+              results.push(`❌ لا يوجد وصف كافٍ لإنشاء \`${op.file_path}\`. أعد الطلب بمزيد من التفاصيل.`);
+              continue;
+            }
             content = await generateFileContent(
-              op.content_instruction,
+              op.content_instruction || `عدّل الملف حسب طلب المستخدم: ${userMsg}`,
               op.file_path,
               existing?.content || null,
               userId
@@ -533,9 +540,15 @@ bot.on('text', async ctx => {
             content = op.content_instruction;
           }
 
+          // ضمان أن المحتوى سلسلة نصية قابلة للكتابة
+          if (content === null || content === undefined || content === '') {
+            results.push(`❌ فشل توليد محتوى \`${op.file_path}\`. حاول مرة أخرى بوصف أوضح.`);
+            continue;
+          }
+
           const url = await writeFile(
             op.file_path,
-            content,
+            String(content),
             op.commit_message,
             existing?.sha || null
           );
