@@ -1,6 +1,6 @@
 /**
- * بوت تيليجرام الذكي — مثل ريبلت Agent
- * يفهم السياق، يتكلم طبيعي، ويسأل عند الحاجة، وينفذ المهام بكفاءة
+ * بوت تيليجرام — شخصية ريبلت Agent بنسبة 100%
+ * يفكر بصوت عالٍ، يشرح قراراته، يلاحظ المشاكل، ويعطي خطوات واضحة
  */
 
 const { Telegraf } = require('telegraf');
@@ -35,7 +35,7 @@ const GH_HEADERS  = {
 //  تخزين المسؤولين والسياق
 // ============================================================
 const ADMINS_FILE   = path.join(__dirname, '..', 'admins.json');
-const HISTORY_LIMIT = 12;
+const HISTORY_LIMIT = 14;
 
 function loadAdmins() {
   try {
@@ -45,9 +45,8 @@ function loadAdmins() {
   return new Set([OWNER_ID]);
 }
 function saveAdmins(s) {
-  try {
-    fs.writeFileSync(ADMINS_FILE, JSON.stringify([...s].filter(id => id !== OWNER_ID)), 'utf8');
-  } catch (_) {}
+  try { fs.writeFileSync(ADMINS_FILE, JSON.stringify([...s].filter(id => id !== OWNER_ID)), 'utf8'); }
+  catch (_) {}
 }
 
 const admins = loadAdmins();
@@ -55,29 +54,29 @@ const conversationHistory = new Map();
 const repoCache = { tree: null, contents: {}, lastFetch: 0 };
 const CACHE_TTL = 3 * 60 * 1000;
 
-function addToHistory(userId, role, content) {
-  if (!conversationHistory.has(userId)) conversationHistory.set(userId, []);
-  const h = conversationHistory.get(userId);
+function addToHistory(uid, role, content) {
+  if (!conversationHistory.has(uid)) conversationHistory.set(uid, []);
+  const h = conversationHistory.get(uid);
   h.push({ role, content: String(content).slice(0, 2500) });
   if (h.length > HISTORY_LIMIT) h.splice(0, h.length - HISTORY_LIMIT);
 }
-function getHistory(userId) { return conversationHistory.get(userId) || []; }
+function getHistory(uid) { return conversationHistory.get(uid) || []; }
 
-const PRIORITY_PATTERNS = [
+// أنماط الأولوية والتخطي
+const PRIORITY_RE = [
   /^package\.json$/, /^index\.(js|ts|py|go)$/, /^main\.(js|ts|py|go)$/,
   /^app\.(js|ts|py)$/, /^bot\.(js|ts|py)$/, /^server\.(js|ts|py)$/,
   /^config\.(js|ts|json|py)$/, /^\.env\.example$/, /^requirements\.txt$/,
   /^Dockerfile$/, /^README\.md$/i,
   /^src\/(bot|index|main|app|handler|command|commands)\.(js|ts|py)$/,
 ];
-const SKIP_PATTERNS = [
+const SKIP_RE = [
   /node_modules/, /\.git\//, /dist\//, /build\//, /\.min\.(js|css)$/,
   /package-lock\.json$/, /yarn\.lock$/, /pnpm-lock\.yaml$/, /admins\.json$/,
   /\.(png|jpg|jpeg|gif|ico|svg|pdf|zip|tar|gz|woff|ttf|mp3|mp4)$/i,
 ];
-
-const shouldSkip = f => SKIP_PATTERNS.some(p => p.test(f));
-const isPriority = f => PRIORITY_PATTERNS.some(p => p.test(f));
+const shouldSkip = f => SKIP_RE.some(p => p.test(f));
+const isPriority = f => PRIORITY_RE.some(p => p.test(f));
 
 // ============================================================
 //  استدعاء AI مع retry
@@ -88,7 +87,7 @@ async function callAI(messages, jsonMode = false, retries = 4) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       if (AI_PROVIDER === 'groq') {
-        const body = { model: 'llama-3.3-70b-versatile', messages, temperature: 0.3, max_tokens: 8192 };
+        const body = { model: 'llama-3.3-70b-versatile', messages, temperature: 0.35, max_tokens: 8192 };
         if (jsonMode) body.response_format = { type: 'json_object' };
         const res = await axios.post(
           'https://api.groq.com/openai/v1/chat/completions', body,
@@ -96,14 +95,13 @@ async function callAI(messages, jsonMode = false, retries = 4) {
         );
         return res.data.choices[0].message.content.trim();
       } else {
-        const gMsgs = messages
-          .filter(m => m.role !== 'system')
+        const gMsgs = messages.filter(m => m.role !== 'system')
           .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
         const sys = messages.find(m => m.role === 'system');
         if (sys && gMsgs.length > 0) gMsgs[0].parts[0].text = sys.content + '\n\n' + gMsgs[0].parts[0].text;
         const res = await axios.post(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-          { contents: gMsgs, generationConfig: { temperature: 0.3, maxOutputTokens: 8192, ...(jsonMode ? { responseMimeType: 'application/json' } : {}) } },
+          { contents: gMsgs, generationConfig: { temperature: 0.35, maxOutputTokens: 8192, ...(jsonMode ? { responseMimeType: 'application/json' } : {}) } },
           { headers: { 'Content-Type': 'application/json' }, timeout: 90000 }
         );
         return res.data.candidates[0].content.parts[0].text.trim();
@@ -121,10 +119,8 @@ async function callAI(messages, jsonMode = false, retries = 4) {
   }
 }
 
-function parseJSON(raw) {
-  const c = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-  return JSON.parse(c);
-}
+const parseJSON = raw =>
+  JSON.parse(raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim());
 
 // ============================================================
 //  GitHub helpers
@@ -148,9 +144,9 @@ async function readFile(filePath, useCache = true) {
       `https://api.github.com/repos/${FULL_REPO}/contents/${encodeURIComponent(filePath)}?ref=${GITHUB_BRANCH}`,
       { headers: GH_HEADERS }
     );
-    const result = { content: Buffer.from(res.data.content, 'base64').toString('utf8'), sha: res.data.sha };
-    repoCache.contents[filePath] = result;
-    return result;
+    const r = { content: Buffer.from(res.data.content, 'base64').toString('utf8'), sha: res.data.sha };
+    repoCache.contents[filePath] = r;
+    return r;
   } catch (e) {
     if (e.response?.status === 404) { repoCache.contents[filePath] = null; return null; }
     throw e;
@@ -183,10 +179,10 @@ async function deleteFile(filePath, sha, commitMsg) {
 }
 
 async function readAllFiles(fileTree) {
-  const allUsable = fileTree.filter(f => !shouldSkip(f));
-  const priority  = allUsable.filter(isPriority);
-  const others    = allUsable.filter(f => !isPriority(f));
-  const toRead    = allUsable.length <= 40 ? allUsable : [...new Set([...priority, ...others.slice(0, 20)])];
+  const all  = fileTree.filter(f => !shouldSkip(f));
+  const pri  = all.filter(isPriority);
+  const rest = all.filter(f => !isPriority(f));
+  const toRead = all.length <= 40 ? all : [...new Set([...pri, ...rest.slice(0, 20)])];
   await Promise.all(toRead.map(fp => readFile(fp, true)));
   const sections = toRead.map(fp => {
     const c = repoCache.contents[fp]?.content;
@@ -194,105 +190,108 @@ async function readAllFiles(fileTree) {
     const max = isPriority(fp) ? 6000 : 3000;
     return `\n${'─'.repeat(50)}\n📄 ${fp}\n${'─'.repeat(50)}\n${c.length > max ? c.slice(0, max) + `\n...[${c.length - max} حرف محذوف]` : c}`;
   }).filter(Boolean);
-  return { context: sections.join('\n'), readCount: toRead.length, totalCount: allUsable.length };
+  return { context: sections.join('\n'), readCount: toRead.length, totalCount: all.length };
 }
 
 // ============================================================
-//  تصنيف الرسالة — هل هي محادثة؟ سؤال؟ أم مهمة؟
+//  شخصية ريبلت — المحور الأساسي
 // ============================================================
 
-async function classifyMessage(userMsg, history) {
-  const sys = `أنت مساعد ذكي. صنّف رسالة المستخدم إلى إحدى ثلاث فئات.
+const REPLIT_PERSONALITY = `أنت مساعد ذكي مدمج في بوت تيليجرام يدير مستودع GitHub.
 
-أجب بـ JSON فقط:
-{
-  "type": "chat" | "question" | "task",
-  "confidence": "high" | "low",
-  "reason": "سبب التصنيف بكلمة أو كلمتين"
-}
+شخصيتك تماماً مثل ريبلت Agent:
+- تتكلم بصوت عالٍ عن تفكيرك: "لاحظت أن..."، "سأقوم بـ..."، "المشكلة هنا هي..."
+- عند إنهاء مهمة: تشرح بالتفصيل ما فعلته وتعطي خطوات ما بعد التنفيذ
+- تلاحظ مشاكل إضافية وتذكرها حتى لو لم تُطلب
+- تسأل سؤالاً واحداً محدداً مع مثال عند الحاجة للتوضيح
+- ردودك منظّمة: نقطة للمعلومات، نقطة للخطوات، نقطة للتحذيرات
+- لا تقول فقط "تم" — دائماً تشرح ماذا تغيّر ولماذا
+- تكلّم بنفس لغة المستخدم (عربي أو إنجليزي) وبأسلوب طبيعي مريح`;
 
-تعريف الفئات:
-- "chat": كلام عادي، تحية، سؤال شخصي عن البوت، شكر، انتقاد، عواطف
-  أمثلة: "هلو"، "شلونك"، "شكراً"، "أنت ذكي"، "من أنت"
-- "question": سؤال عن كيفية عمل شيء، استفسار يحتاج شرحاً دون تنفيذ
-  أمثلة: "كيف أضيف أدمن"، "ماذا يفعل هذا الكود"، "ما الفرق بين X وY"
-- "task": طلب تنفيذ عمل فعلي على الملفات أو الكود
-  أمثلة: "عدّل bot.js"، "أضف ميزة /stats"، "احذف ملف test.js"، "أنشئ ملف جديد"`;
-
+// ============================================================
+//  تصنيف الرسالة
+// ============================================================
+async function classifyMessage(msg, history) {
   try {
     const raw = await callAI([
-      { role: 'system', content: sys },
+      {
+        role: 'system',
+        content: `صنّف رسالة المستخدم. أجب بـ JSON فقط:
+{"type": "chat" | "question" | "task"}
+
+chat: تحية، كلام عادي، شكر، انتقاد، سؤال شخصي عن البوت، "من أنت"
+  أمثلة: "هلو"، "شلونك"، "شكراً"، "أنت غبي"، "ما اسمك"، "كيف حالك"
+question: سؤال يحتاج شرحاً دون تنفيذ فعلي
+  أمثلة: "كيف أضيف أدمن"، "ماذا يفعل هذا الأمر"، "ما الفرق بين X وY"
+task: طلب تنفيذ عمل فعلي على الكود أو الملفات
+  أمثلة: "عدّل bot.js"، "أضف ميزة"، "احذف ملف"، "أنشئ"، "غيّر"`,
+      },
       ...history.slice(-4),
-      { role: 'user', content: userMsg }
+      { role: 'user', content: msg },
     ], true);
     return parseJSON(raw);
   } catch (_) {
-    return { type: 'task', confidence: 'low', reason: 'fallback' };
+    return { type: 'task' };
   }
 }
 
 // ============================================================
-//  ردود المحادثة الطبيعية
+//  ردود المحادثة الطبيعية (شخصية ريبلت)
 // ============================================================
+async function chatReply(msg, history) {
+  const sys = `${REPLIT_PERSONALITY}
 
-async function chatReply(userMsg, history) {
-  const sys = `أنت مساعد ذكاء اصطناعي مدمج في بوت تيليجرام لإدارة مستودعات GitHub.
-
-معلوماتك:
+معلوماتك الحالية:
 - المستودع المربوط: ${FULL_REPO} (فرع: ${GITHUB_BRANCH})
-- الذكاء الاصطناعي المستخدم: ${AI_PROVIDER.toUpperCase()}
-- قدراتك: تعديل وإنشاء وقراءة وحذف ملفات المستودع
+- الذكاء الاصطناعي: ${AI_PROVIDER.toUpperCase()}
+- قدراتك: قراءة وتعديل وإنشاء وحذف ملفات المستودع على GitHub
 
-أسلوبك في الكلام:
-- تكلّم بشكل طبيعي وودّي، مثل مساعد بشري ذكي
-- اردّ باللغة التي يستخدمها المستخدم (عربي أو إنجليزي)
-- إجاباتك مختصرة ومفيدة — لا تطوّل بلا داعٍ
-- عندما تُسأل عن قدراتك، اشرح ما تستطيع فعله بمستودع GitHub
-- لا تقل "أنا مجرد برنامج" — تصرّف كمساعد ذكي حقيقي`;
+تعليمات إضافية:
+- إذا سألك أحد "من أنت": عرّف نفسك كمساعد ذكي لإدارة GitHub، اذكر المستودع والقدرات
+- إذا شكرك: رد بشكل طبيعي واسأل إذا يحتاج شيئاً آخر
+- إذا انتقدك: تقبّل النقد بشكل إيجابي واسأل كيف تتحسّن
+- اجعل ردودك قصيرة ومباشرة — لا تطوّل بلا داعٍ`;
 
   return await callAI([
     { role: 'system', content: sys },
     ...history,
-    { role: 'user', content: userMsg }
+    { role: 'user', content: msg },
   ], false);
 }
 
 // ============================================================
-//  ردود الأسئلة (شرح دون تنفيذ)
+//  ردود الأسئلة (شرح + توجيه بأسلوب ريبلت)
 // ============================================================
-
-async function questionReply(userMsg, history, fileTree) {
-  const sys = `أنت مطور خبير ومساعد ذكي لإدارة مستودع GitHub.
+async function questionReply(msg, history, fileTree) {
+  const sys = `${REPLIT_PERSONALITY}
 
 المستودع: ${FULL_REPO} | الفرع: ${GITHUB_BRANCH}
 ملفات المستودع:
-${fileTree.slice(0, 30).join('\n')}${fileTree.length > 30 ? `\n...و ${fileTree.length - 30} ملف آخر` : ''}
+${fileTree.filter(f => !shouldSkip(f)).slice(0, 25).join('\n')}${fileTree.length > 25 ? `\n...و ${fileTree.length - 25} آخر` : ''}
 
-مهمتك: أجب على سؤال المستخدم بشكل واضح ومفيد.
-
-قواعد:
-- إذا سألك عن كيفية إضافة ميزة → اشرح الخطوات وما الذي سيتغير في الكود
-- إذا سألك عن ملف → اشرح ما يفعله بناءً على قائمة الملفات
-- إذا سألك عن مفهوم برمجي → اشرح بأمثلة من مستودعه
-- في نهاية ردك: اسأل "هل تريد مني تنفيذ هذا؟" إذا كان السؤال قابلاً للتطبيق
-- تكلّم بنفس لغة المستخدم (عربي أو إنجليزي)
-- اختصر دون إخلال بالمعنى`;
+أسلوبك في الإجابة:
+1. ابدأ بـ "لاحظت سؤالك عن..." أو "بخصوص..." أو ادخل مباشرة للإجابة
+2. اشرح الموضوع بوضوح مع مثال من مستودعه إذا أمكن
+3. إذا كان السؤال قابلاً للتطبيق، اختم بـ "هل تريد مني تنفيذ هذا مباشرة؟"
+4. إذا لاحظت مشكلة محتملة، نبّه عليها
+5. كن موجزاً — لا تكرر المعلومات`;
 
   return await callAI([
     { role: 'system', content: sys },
     ...history.slice(-6),
-    { role: 'user', content: userMsg }
+    { role: 'user', content: msg },
   ], false);
 }
 
 // ============================================================
-//  تخطيط المهام مع كل السياق
+//  تخطيط المهام
 // ============================================================
+async function planTask(msg, fileTree, repoCtx, history) {
+  const sys = `${REPLIT_PERSONALITY}
 
-async function planTask(userMsg, fileTree, repoCtx, history) {
-  const sys = `أنت مطور برمجيات محترف تعمل مثل ريبلت Agent. قرأت كل ملفات المشروع.
+أنت تخطط لتنفيذ مهمة برمجية بعد قراءة كل ملفات المشروع.
 
-المستودع: ${FULL_REPO} | الفرع: ${GITHUB_BRANCH} | AI: ${AI_PROVIDER.toUpperCase()}
+المستودع: ${FULL_REPO} | الفرع: ${GITHUB_BRANCH}
 
 ━━━━ محتوى الملفات (${repoCtx.readCount}/${repoCtx.totalCount} ملف) ━━━━
 ${repoCtx.context || '[مستودع فارغ]'}
@@ -303,52 +302,51 @@ ${fileTree.join('\n')}
 
 أجب بـ JSON فقط:
 {
-  "explanation_ar": "اشرح ما ستفعله بوضوح (جملة أو جملتان)",
+  "understood": "ما فهمته من الطلب بكلامك أنت — جملة واحدة",
+  "approach": "كيف ستنفذ — جملة أو جملتان",
+  "notices": ["أشياء لاحظتها في الكود قد تكون مهمة للمستخدم — اذكر 0-2 ملاحظات"],
   "needs_clarification": false,
-  "clarification_question": "إذا needs_clarification=true: سؤال واحد محدد يحتاجه للتنفيذ",
+  "clarification_question": "إذا needs_clarification=true: سؤال واحد محدد مع مثال",
   "operations": [
     {
       "action": "create" | "update" | "delete" | "read" | "list",
       "file_path": "المسار الكامل",
       "commit_message": "رسالة واضحة بالإنجليزي",
-      "detailed_instructions": "تعليمات مفصّلة جداً: كل دالة تُضاف، كل منطق، كل تغيير. هذا ما سيُبنى عليه الكود.",
+      "detailed_instructions": "تعليمات مفصّلة جداً — كل دالة تُضاف، كل منطق، كل تغيير. هذا الوصف هو أساس الكود.",
       "must_preserve": "أجزاء تبقى كما هي",
       "must_add": "ما يُضاف",
       "must_remove": "ما يُحذف"
     }
-  ]
+  ],
+  "next_steps": ["ما يجب على المستخدم فعله بعد التنفيذ — مثل: أعد تشغيل البوت، اختبر الأمر /x"]
 }
 
-قواعد:
-• needs_clarification=true: فقط عندما الطلب يحتمل تفسيرات متعارضة ولا يمكن الاختيار بذكاء
-• حافظ على نمط الكود القائم بالضبط
+قواعد التخطيط:
+• needs_clarification=true: فقط عند التعارض الحقيقي — تصرّف بذكاء في كل الحالات الأخرى
+• حافظ على نمط الكود القائم بالضبط (نفس require/import، نفس الأسلوب)
 • إذا التعديل يؤثر على ملفات أخرى، أضفها كعمليات منفصلة`;
 
   const raw = await callAI([
     { role: 'system', content: sys },
     ...history.slice(-4),
-    { role: 'user', content: userMsg }
+    { role: 'user', content: msg },
   ], true);
   return parseJSON(raw);
 }
 
 // ============================================================
-//  توليد الكود
+//  توليد الكود الفعلي
 // ============================================================
-
 async function generateCode(op, existingContent, userMsg, history) {
   const isCode = /\.(js|ts|jsx|tsx|mjs|cjs|py|go|rs|java|cpp|c|cs|php|rb|swift|kt)$/.test(op.file_path);
   const isJson = op.file_path.endsWith('.json');
 
-  const sysLines = [
+  const sys = [
     `أنت مطور خبير. اكتب المحتوى الكامل للملف "${op.file_path}" فقط.`,
-    `بدون شرح، بدون markdown fences، بدون أي نص إضافي. الملف الكامل فقط.`,
-  ];
-  if (isCode) sysLines.push(
-    `استخدم backtick للـ template literals عند \${...} — ليس single/double quote.`,
-    `تحقق من صحة جميع الـ require/import. لا TODO، لا placeholder — كود حقيقي.`
-  );
-  if (isJson) sysLines.push(`JSON صحيح فقط — لا تعليقات.`);
+    `بدون شرح، بدون markdown fences. الملف الكامل — ليس جزءاً منه.`,
+    isCode ? `استخدم backtick للـ template literals عند \${...}. تحقق من كل require/import. لا TODO.` : '',
+    isJson ? `JSON صحيح فقط — لا تعليقات.` : '',
+  ].filter(Boolean).join('\n');
 
   const existingSection = existingContent
     ? `\nالملف الحالي:\n${existingContent.length > 8000 ? existingContent.slice(0, 8000) + '\n...[مقتطع]' : existingContent}`
@@ -366,7 +364,7 @@ async function generateCode(op, existingContent, userMsg, history) {
   ].filter(Boolean).join('\n');
 
   let result = await callAI([
-    { role: 'system', content: sysLines.join('\n') },
+    { role: 'system', content: sys },
     ...history.slice(-3),
     { role: 'user', content: prompt },
   ], false);
@@ -379,6 +377,45 @@ async function generateCode(op, existingContent, userMsg, history) {
     );
   }
   return result;
+}
+
+// ============================================================
+//  ملخص ما بعد التنفيذ — بأسلوب ريبلت
+// ============================================================
+async function generateSummary(userMsg, plan, executedOps, history) {
+  const sys = `${REPLIT_PERSONALITY}
+
+أنت الآن تكتب ملخص ما بعد التنفيذ للمستخدم، بأسلوب ريبلت Agent تماماً.
+
+الأسلوب المطلوب:
+- ابدأ بـ "تمام!" أو "خلصت!" أو "جاهز!" أو ما يناسب السياق — جملة افتتاحية طبيعية
+- اشرح ماذا فعلت بالتفصيل: "أضفت [X] في [ملف]"، "عدّلت [دالة] لتفعل [Y]"
+- إذا لاحظت مشاكل أثناء العمل، اذكرها
+- اذكر الخطوات التالية التي يحتاجها المستخدم
+- تكلّم بنفس لغة المستخدم
+- اجعل الرد منظّماً لكن طبيعياً — مش رسمي جداً`;
+
+  const opsStr = executedOps.map(o => `${o.action}: ${o.file_path} — ${o.result}`).join('\n');
+  const noticesStr = plan.notices?.length ? `\nملاحظات أثناء العمل:\n${plan.notices.join('\n')}` : '';
+  const nextStr = plan.next_steps?.length ? `\nخطوات مقترحة بعد التنفيذ:\n${plan.next_steps.join('\n')}` : '';
+
+  const prompt = `الطلب الأصلي: ${userMsg}
+ما فهمته: ${plan.understood}
+طريقة التنفيذ: ${plan.approach}
+العمليات المنفذة:
+${opsStr}${noticesStr}${nextStr}
+
+اكتب الملخص الآن:`;
+
+  try {
+    return await callAI([
+      { role: 'system', content: sys },
+      ...history.slice(-3),
+      { role: 'user', content: prompt },
+    ], false);
+  } catch (_) {
+    return executedOps.map(o => o.result).join('\n');
+  }
 }
 
 // ============================================================
@@ -430,20 +467,18 @@ bot.use(async (ctx, next) => {
 });
 
 bot.start(ctx => safeSend(ctx,
-  `أهلاً! 👋 أنا مساعدك الذكي لإدارة مستودع GitHub.\n\n` +
+  `أهلاً! 👋 أنا مساعدك لإدارة مستودع GitHub.\n\n` +
   `*المستودع:* \`${FULL_REPO}\`\n` +
   `*الفرع:* \`${GITHUB_BRANCH}\` | *AI:* \`${AI_PROVIDER.toUpperCase()}\`\n\n` +
-  `كلمني بشكل طبيعي — أفهم ما تريده وأتصرف:\n\n` +
-  `💬 _"هلو شلونك"_ → أرد طبيعي\n` +
-  `🤔 _"كيف أضيف أدمن؟"_ → أشرح لك\n` +
-  `⚙️ _"عدّل bot.js وأضف /stats"_ → أنفذ مباشرة\n` +
-  `📋 _"اعرض الملفات"_ → أعرضها\n\n` +
-  `ما الذي تريده؟`
+  `تكلّم معي بشكل طبيعي — أفهم ما تريد:\n\n` +
+  `💬 "هلو" ← أرد طبيعي\n` +
+  `🤔 "كيف أضيف أدمن؟" ← أشرح لك\n` +
+  `⚙️ "عدّل bot.js وأضف /stats" ← أنفذ مباشرة\n\n` +
+  `ما الذي تحتاجه؟`
 ));
 
 bot.help(ctx => safeSend(ctx,
   `*الأوامر:*\n\n` +
-  `*/start* — رسالة الترحيب\n` +
   `*/repo* — معلومات المستودع\n` +
   `*/files* — عرض كل الملفات\n` +
   `*/read [مسار]* — قراءة ملف\n` +
@@ -451,7 +486,7 @@ bot.help(ctx => safeSend(ctx,
   `*/clear* — مسح سياق المحادثة\n` +
   `*/admin [ID]* — إضافة مسؤول\n` +
   `*/removeadmin [ID]* — إزالة مسؤول\n\n` +
-  `💡 _أو فقط تكلم معي بشكل طبيعي!_`
+  `أو فقط كلّمني بشكل طبيعي! 💬`
 ));
 
 bot.command('repo', async ctx => {
@@ -505,7 +540,7 @@ bot.command('clear', async ctx => {
 });
 
 bot.command('admin', async ctx => {
-  if (ctx.from?.id !== OWNER_ID) return ctx.reply('🚫 فقط المالك.');
+  if (ctx.from?.id !== OWNER_ID) return ctx.reply('🚫 فقط المالك يمكنه إضافة مسؤولين.');
   const id = parseInt(ctx.message.text.split(' ')[1]);
   if (!id) return ctx.reply('مثال: /admin 123456789\nاحصل على ID من @userinfobot');
   if (admins.has(id)) return ctx.reply('ℹ️ هذا المستخدم مسؤول بالفعل.');
@@ -522,16 +557,15 @@ bot.command('removeadmin', async ctx => {
 });
 
 // ============================================================
-//  المعالج الرئيسي — ذكاء كامل مثل ريبلت
+//  المعالج الرئيسي — ريبلت Agent بنسبة 100%
 // ============================================================
-
 bot.on('text', async ctx => {
   const userMsg = ctx.message.text;
   if (userMsg.startsWith('/')) return;
 
   const userId = ctx.from?.id;
   if (processingUsers.has(userId)) {
-    return ctx.reply('⏳ جاري معالجة طلبك، انتظر لحظة...');
+    return ctx.reply('⏳ لا تزال عندي مهمة جارية، انتظر لحظة...');
   }
   processingUsers.add(userId);
 
@@ -539,48 +573,45 @@ bot.on('text', async ctx => {
   try {
     const history = getHistory(userId);
 
-    // ── تصنيف الرسالة أولاً (خفيف وسريع) ────────────────
-    const classification = await classifyMessage(userMsg, history);
+    // ── تصنيف الرسالة ─────────────────────────────────────
+    const { type } = await classifyMessage(userMsg, history);
 
-    // ── محادثة عادية → رد طبيعي ──────────────────────────
-    if (classification.type === 'chat') {
+    // ── محادثة عادية ─────────────────────────────────────
+    if (type === 'chat') {
       await ctx.sendChatAction('typing');
       const reply = await chatReply(userMsg, history);
       addToHistory(userId, 'user', userMsg);
       addToHistory(userId, 'assistant', reply);
-      await safeSend(ctx, reply);
-      return;
+      return await safeSend(ctx, reply);
     }
 
-    // ── سؤال → شرح + عرض مساعدة ─────────────────────────
-    if (classification.type === 'question') {
+    // ── سؤال → شرح بأسلوب ريبلت ─────────────────────────
+    if (type === 'question') {
       await ctx.sendChatAction('typing');
       let fileTree = [];
       try { fileTree = await getFileTree(); } catch (_) {}
       const reply = await questionReply(userMsg, history, fileTree);
       addToHistory(userId, 'user', userMsg);
       addToHistory(userId, 'assistant', reply);
-      await safeSend(ctx, reply);
-      return;
+      return await safeSend(ctx, reply);
     }
 
     // ── مهمة → قراءة كل الملفات ثم التخطيط ثم التنفيذ ──
-    statusMsg = await ctx.reply('📂 جاري قراءة المشروع كاملاً...');
+    statusMsg = await ctx.reply('📂 جاري قراءة المشروع...');
 
     let fileTree = [];
     try { fileTree = await getFileTree(); } catch (_) {}
 
     const readableCount = fileTree.filter(f => !shouldSkip(f)).length;
-    await safeEdit(ctx, statusMsg.message_id,
-      `📖 جاري قراءة ${readableCount} ملف...\n_فهم كامل قبل أي تعديل_`
-    );
+    await safeEdit(ctx, statusMsg.message_id, `📖 أقرأ ${readableCount} ملف للفهم الكامل...`);
 
     const repoCtx = await readAllFiles(fileTree);
 
     await safeEdit(ctx, statusMsg.message_id,
-      `✅ تمت قراءة ${repoCtx.readCount}/${repoCtx.totalCount} ملف\n🧠 جاري التحليل والتخطيط...`
+      `✅ قرأت ${repoCtx.readCount} ملف\n🧠 أحلّل وأخطط...`
     );
 
+    // ── التخطيط ───────────────────────────────────────────
     let plan;
     try {
       plan = await planTask(userMsg, fileTree, repoCtx, history);
@@ -592,7 +623,7 @@ bot.on('text', async ctx => {
       throw err;
     }
 
-    // إذا يحتاج توضيحاً → يسأل بأسلوب طبيعي
+    // يسأل إذا يحتاج توضيحاً — بأسلوب طبيعي
     if (plan.needs_clarification && plan.clarification_question?.trim()) {
       await safeEdit(ctx, statusMsg.message_id, plan.clarification_question);
       addToHistory(userId, 'user', userMsg);
@@ -602,75 +633,121 @@ bot.on('text', async ctx => {
 
     const ops = plan.operations || [];
     if (!ops.length) {
-      await safeEdit(ctx, statusMsg.message_id, '🤔 لم أفهم الطلب تماماً. ممكن توضح أكثر؟');
+      const confused = await chatReply(`المستخدم قال: "${userMsg}" ولم أفهم ماذا يريد بالضبط. أخبره بلطف أنني لم أفهم واسأله يوضح`, history);
+      await safeEdit(ctx, statusMsg.message_id, confused);
       return;
     }
 
+    // عرض الخطة بأسلوب ريبلت
     const icons = { create: '🆕', update: '✏️', delete: '🗑️', read: '📖', list: '📋' };
     const opsList = ops.map(o => `${icons[o.action] || '⚙️'} \`${o.file_path}\``).join('\n');
     await safeEdit(ctx, statusMsg.message_id,
-      `📋 *الخطة:* ${plan.explanation_ar}\n\n${opsList}\n\n⏳ جاري التنفيذ...`
+      `🔍 *فهمت:* ${plan.understood}\n\n` +
+      `📋 *الخطة:* ${plan.approach}\n\n` +
+      `${opsList}\n\n⏳ أبدأ التنفيذ...`
     );
 
-    const results = [];
+    // ── التنفيذ ───────────────────────────────────────────
+    const executedOps = [];
+
     for (const op of ops) {
       try {
         if (op.action === 'list') {
           const filtered = op.file_path
             ? fileTree.filter(f => f.startsWith(op.file_path))
             : fileTree.filter(f => !shouldSkip(f));
-          results.push(
-            `*📋 الملفات (${filtered.length}):*\n` +
-            filtered.slice(0, 60).map(f => `📄 \`${f}\``).join('\n') +
-            (filtered.length > 60 ? `\n_...و ${filtered.length - 60} أخرى_` : '')
-          );
+          executedOps.push({ action: 'list', file_path: op.file_path || '/', result: `عرضت ${filtered.length} ملف` });
+
         } else if (op.action === 'read') {
           const f = await readFile(op.file_path);
-          if (!f) { results.push(`❌ \`${op.file_path}\` غير موجود`); continue; }
-          const preview = f.content.length > 2500 ? f.content.slice(0, 2500) + '\n_...مقتطع_' : f.content;
-          results.push(`*📄 ${op.file_path}:*\n\`\`\`\n${preview}\n\`\`\``);
+          if (!f) { executedOps.push({ action: 'read', file_path: op.file_path, result: 'الملف غير موجود' }); continue; }
+          executedOps.push({ action: 'read', file_path: op.file_path, result: `قرأت ${f.content.length} حرف` });
+
         } else if (op.action === 'delete') {
           const f = await readFile(op.file_path, false);
-          if (!f) { results.push(`❌ \`${op.file_path}\` غير موجود`); continue; }
+          if (!f) { executedOps.push({ action: 'delete', file_path: op.file_path, result: 'الملف غير موجود' }); continue; }
           await deleteFile(op.file_path, f.sha, op.commit_message);
-          results.push(`🗑️ تم حذف \`${op.file_path}\` ✅`);
+          executedOps.push({ action: 'delete', file_path: op.file_path, result: 'حُذف بنجاح' });
+
         } else if (op.action === 'create' || op.action === 'update') {
           const fresh = await readFile(op.file_path, false);
           const existingContent = fresh?.content || null;
           const sha = fresh?.sha || null;
+
           const content = await generateCode(op, existingContent, userMsg, history);
-          if (!content?.trim()) { results.push(`❌ فشل توليد \`${op.file_path}\`.`); continue; }
+          if (!content?.trim()) {
+            executedOps.push({ action: op.action, file_path: op.file_path, result: 'فشل التوليد' });
+            continue;
+          }
+
           const url = await writeFile(op.file_path, content, op.commit_message, sha);
-          results.push(
-            `✅ ${existingContent ? 'تم تعديل' : 'تم إنشاء'} \`${op.file_path}\`\n` +
-            `💬 \`${op.commit_message}\`\n` +
-            (url ? `🔗 [GitHub](${url})` : '')
-          );
+          executedOps.push({
+            action: op.action,
+            file_path: op.file_path,
+            result: `${existingContent ? 'تم التعديل' : 'تم الإنشاء'} — ${op.commit_message}`,
+            url,
+          });
         }
       } catch (opErr) {
-        results.push(`❌ خطأ في \`${op.file_path || 'العملية'}\`: ${opErr.response?.data?.message || opErr.message}`);
+        executedOps.push({
+          action: op.action,
+          file_path: op.file_path || '?',
+          result: `خطأ: ${opErr.response?.data?.message || opErr.message}`,
+        });
       }
     }
 
     addToHistory(userId, 'user', userMsg);
-    addToHistory(userId, 'assistant',
-      `نفّذت: ${plan.explanation_ar} | الملفات: ${ops.map(o => o.file_path).join(', ')}`
-    );
 
-    const finalText = results.join('\n\n---\n\n');
-    if (finalText.length > 4000) {
+    // ── الملخص النهائي بأسلوب ريبلت ─────────────────────
+    // عرض ملفات للقراءة بشكل منفصل إذا وجدت
+    const readOps = executedOps.filter(o => o.action === 'read');
+    const taskOps = executedOps.filter(o => o.action !== 'read');
+
+    // الملخص الطبيعي
+    const summary = await generateSummary(userMsg, plan, taskOps.length ? taskOps : executedOps, history);
+    addToHistory(userId, 'assistant', summary);
+
+    // إرسال محتوى الملفات المقروءة أولاً
+    for (const ro of readOps) {
+      const f = repoCache.contents[ro.file_path];
+      if (f?.content) {
+        const preview = f.content.length > 2500 ? f.content.slice(0, 2500) + '\n_...مقتطع_' : f.content;
+        await safeSend(ctx, `*📄 ${ro.file_path}:*\n\`\`\`\n${preview}\n\`\`\``);
+      }
+    }
+
+    // عرض روابط GitHub إذا وجدت
+    const links = executedOps.filter(o => o.url).map(o => `🔗 [${o.file_path}](${o.url})`).join('\n');
+
+    const finalMsg = summary + (links ? `\n\n${links}` : '');
+
+    if (finalMsg.length > 4000) {
       await safeEdit(ctx, statusMsg.message_id, '✅ اكتملت العمليات:');
-      for (const chunk of splitMessage(finalText)) await safeSend(ctx, chunk);
+      for (const chunk of splitMessage(finalMsg)) await safeSend(ctx, chunk);
     } else {
-      await safeEdit(ctx, statusMsg.message_id, finalText);
+      await safeEdit(ctx, statusMsg.message_id, finalMsg);
+    }
+
+    // list results
+    const listOps = executedOps.filter(o => o.action === 'list');
+    for (const lo of listOps) {
+      const filtered = lo.file_path !== '/'
+        ? fileTree.filter(f => f.startsWith(lo.file_path))
+        : fileTree.filter(f => !shouldSkip(f));
+      const display = filtered.slice(0, 60).map(f => `📄 \`${f}\``).join('\n');
+      await safeSend(ctx,
+        `*📋 الملفات (${filtered.length}):*\n${display}` +
+        (filtered.length > 60 ? `\n_...و ${filtered.length - 60} أخرى_` : '')
+      );
     }
 
   } catch (err) {
     console.error('Bot error:', err.response?.data || err.message);
     const isRate = err.response?.status === 429;
     const msg = isRate
-      ? '⏳ تجاوز حد الطلبات. انتظر دقيقة ثم أعد المحاولة.'
-      : `❌ خطأ:\n\`${err.response?.data?.message || err.message}\``;
+      ? '⏳ تجاوز حد الطلبات. انتظر دقيقة ثم أعد.'
+      : `❌ خطأ غير متوقع:\n\`${err.response?.data?.message || err.message}\``;
     if (statusMsg) await safeEdit(ctx, statusMsg.message_id, msg).catch(() => {});
     else await ctx.reply(msg);
   } finally {
