@@ -1,3 +1,4 @@
+```javascript
 const TelegramBot = require('node-telegram-bot-api');
 const fetch       = require('node-fetch');
 const fs          = require('fs');
@@ -7,14 +8,14 @@ const path        = require('path');
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OWNER_ID  = parseInt(process.env.TELEGRAM_OWNER_ID, 10);
 const AI_KEY = process.env.GROQ_API_KEY;
-    if (!AI_KEY) throw new Error('❌ GROQ_API_KEY مطلوب — احصل عليه من https://console.groq.com');
+if (!AI_KEY) throw new Error('❌ GROQ_API_KEY مطلوب — احصل عليه من https://console.groq.com');
 
 // ─── Persistent state ─────────────────────────────────────────────────────────
 const STATE_FILE = path.join(__dirname, 'state.json');
 
 function loadState() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
-  catch { return { ghToken: null, ghOwner: null, ghRepo: null, ghBranch: 'main', pendingFile: null }; }
+  catch { return { ghToken: null, ghOwner: null, ghRepo: null, ghBranch: 'main', pendingFile: null, pendingInstruction: null, pendingUpload: null }; }
 }
 function saveState(s) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2), 'utf8');
@@ -42,20 +43,20 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 function isOwner(msg) { return msg.from.id === OWNER_ID; }
 
 // ─── AI call (Groq) ──────────────────────────────────────────────────────────
-    async function aiCall(systemPrompt, userMessage, conversationHistory = []) {
-    const messages = [{ role: 'system', content: systemPrompt }];
-    for (const m of conversationHistory) messages.push({ role: m.role, content: m.content });
-    messages.push({ role: 'user', content: userMessage });
+async function aiCall(systemPrompt, userMessage, conversationHistory = []) {
+  const messages = [{ role: 'system', content: systemPrompt }];
+  for (const m of conversationHistory) messages.push({ role: m.role, content: m.content });
+  messages.push({ role: 'user', content: userMessage });
 
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method : 'POST',
-      headers: { 'Authorization': `Bearer ${AI_KEY}`, 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, temperature: 0.7 }),
-    });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.error?.message || `Groq error ${res.status}`);
-    return d.choices?.[0]?.message?.content?.trim() || '';
-    }
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method : 'POST',
+    headers: { 'Authorization': `Bearer ${AI_KEY}`, 'Content-Type': 'application/json' },
+    body   : JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, temperature: 0.7 }),
+  });
+  const d = await res.json();
+  if (!res.ok) throw new Error(d.error?.message || `Groq error ${res.status}`);
+  return d.choices?.[0]?.message?.content?.trim() || '';
+}
 
 // ─── GitHub helpers ───────────────────────────────────────────────────────────
 function ghHeaders() {
@@ -291,8 +292,33 @@ bot.on('document', async (msg) => {
     { parse_mode: 'Markdown' });
 });
 
+// ─── File path for pending upload ─────────────────────────────────────────────
+bot.on('message', async (msg) => {
+  if (state.pendingUpload && msg.text) {
+    const filePath = msg.text.trim();
+    const file = state.pendingUpload;
+    state.pendingUpload = null;
+    saveState(state);
+    const fileBuffer = await bot.getFile(file.fileId);
+    const fileStream = bot.downloadFile(fileBuffer.file_path);
+    const uploadBuffer = await new Promise((resolve, reject) => {
+      const chunks = [];
+      fileStream.on('data', (chunk) => chunks.push(chunk));
+      fileStream.on('end', () => resolve(Buffer.concat(chunks)));
+      fileStream.on('error', (err) => reject(err));
+    });
+    try {
+      await ghPushFile(filePath, uploadBuffer, `📄 ${file.fileName} — via Telegram`);
+      await bot.sendMessage(msg.chat.id, `✅ تم رفع الملف ${filePath} إلى GitHub!`);
+    } catch (err) {
+      await bot.sendMessage(msg.chat.id, `❌ ${err.message}`);
+    }
+  }
+});
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
 bot.on('polling_error', (err) => console.error('Polling:', err.message));
 process.on('unhandledRejection', (err) => console.error('Unhandled:', err.message));
 
 console.log('🤖 البوت يعمل — AI: Groq (llama-3.3-70b)');
+```
