@@ -6,10 +6,12 @@ const path        = require('path');
 // ─── Config ───────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OWNER_ID  = parseInt(process.env.TELEGRAM_OWNER_ID, 10);
-const GROQ_KEY = process.env.GROQ_API_KEY;
+const AI_KEY = process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY;
+const AI_TYPE = process.env.GEMINI_API_KEY ? 'gemini' : 'groq';
 
-['TELEGRAM_BOT_TOKEN','TELEGRAM_OWNER_ID','GROQ_API_KEY']
+['TELEGRAM_BOT_TOKEN','TELEGRAM_OWNER_ID']
   .forEach(k => { if (!process.env[k]) throw new Error(`❌ المتغير ${k} مطلوب`); });
+if (!AI_KEY) throw new Error('❌ يجب توفير GEMINI_API_KEY أو GROQ_API_KEY');
 
 // ─── Persistent state (saved to state.json) ───────────────────────────────────
 const STATE_FILE = path.join(__dirname, 'state.json');
@@ -80,26 +82,38 @@ async function ghPushFile(filePath, contentBuffer, commitMsg, sha) {
   return data;
 }
 
-// ─── Groq helper ─────────────────────────────────────────────────────────────
+// ─── AI helper (Gemini أو Groq تلقائياً) ─────────────────────────────────────
 async function geminiChat(systemPrompt, userMessage) {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method : 'POST',
-    headers: {
-      'Authorization': `Bearer ${GROQ_KEY}`,
-      'Content-Type' : 'application/json',
-    },
-    body: JSON.stringify({
-      model   : 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userMessage  },
-      ],
-      temperature: 0.2,
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || `Groq error ${res.status}`);
-  return data.choices?.[0]?.message?.content?.trim() || '';
+  if (AI_TYPE === 'gemini') {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${AI_KEY}`;
+    const res = await fetch(url, {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({
+        contents: [{ parts: [{ text: `${systemPrompt}\n\n${userMessage}` }] }],
+        generationConfig: { temperature: 0.2 },
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || `Gemini error ${res.status}`);
+    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+  } else {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method : 'POST',
+      headers: { 'Authorization': `Bearer ${AI_KEY}`, 'Content-Type': 'application/json' },
+      body   : JSON.stringify({
+        model   : 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userMessage  },
+        ],
+        temperature: 0.2,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || `Groq error ${res.status}`);
+    return data.choices?.[0]?.message?.content?.trim() || '';
+  }
 }
 
 // ─── Detect input type ────────────────────────────────────────────────────────
