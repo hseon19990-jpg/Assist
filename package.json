@@ -1,7 +1,7 @@
 {
   "name": "tg-github-bot",
-  "version": "2.0.0",
-  "description": "Telegram bot to edit GitHub files with Arabic AI instructions",
+  "version": "3.0.0",
+  "description": "Telegram bot — edit GitHub files with Arabic instructions via Gemini AI",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
