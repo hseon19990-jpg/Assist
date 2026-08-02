@@ -6,12 +6,8 @@ const path        = require('path');
 // ─── Config ───────────────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OWNER_ID  = parseInt(process.env.TELEGRAM_OWNER_ID, 10);
-const AI_KEY    = process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY;
-const AI_TYPE   = process.env.GEMINI_API_KEY ? 'gemini' : 'groq';
-
-if (!BOT_TOKEN)  throw new Error('❌ TELEGRAM_BOT_TOKEN مطلوب');
-if (!OWNER_ID)   throw new Error('❌ TELEGRAM_OWNER_ID مطلوب');
-if (!AI_KEY)     throw new Error('❌ GEMINI_API_KEY أو GROQ_API_KEY مطلوب');
+const AI_KEY = process.env.GROQ_API_KEY;
+    if (!AI_KEY) throw new Error('❌ GROQ_API_KEY مطلوب — احصل عليه من https://console.groq.com');
 
 // ─── Persistent state ─────────────────────────────────────────────────────────
 const STATE_FILE = path.join(__dirname, 'state.json');
@@ -45,32 +41,10 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 // ─── Owner guard ──────────────────────────────────────────────────────────────
 function isOwner(msg) { return msg.from.id === OWNER_ID; }
 
-// ─── AI call ──────────────────────────────────────────────────────────────────
-async function aiCall(systemPrompt, userMessage, conversationHistory = []) {
-  if (AI_TYPE === 'gemini') {
-    const parts = [];
-    for (const m of conversationHistory) {
-      parts.push({ text: `${m.role === 'user' ? 'المستخدم' : 'المساعد'}: ${m.content}` });
-    }
-    parts.push({ text: userMessage });
-
-    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key=${AI_KEY}`;
-    const res = await fetch(url, {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({
-        contents: [{ parts: [{ text: systemPrompt + '\n\n' + parts.map(p => p.text).join('\n') }] }],
-        generationConfig: { temperature: 0.7 },
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error?.message || `Gemini error ${res.status}`);
-    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
-  } else {
+// ─── AI call (Groq) ──────────────────────────────────────────────────────────
+    async function aiCall(systemPrompt, userMessage, conversationHistory = []) {
     const messages = [{ role: 'system', content: systemPrompt }];
-    for (const m of conversationHistory) {
-      messages.push({ role: m.role, content: m.content });
-    }
+    for (const m of conversationHistory) messages.push({ role: m.role, content: m.content });
     messages.push({ role: 'user', content: userMessage });
 
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -78,11 +52,10 @@ async function aiCall(systemPrompt, userMessage, conversationHistory = []) {
       headers: { 'Authorization': `Bearer ${AI_KEY}`, 'Content-Type': 'application/json' },
       body   : JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, temperature: 0.7 }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error?.message || `Groq error ${res.status}`);
-    return data.choices?.[0]?.message?.content?.trim() || '';
-  }
-}
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error?.message || `Groq error ${res.status}`);
+    return d.choices?.[0]?.message?.content?.trim() || '';
+    }
 
 // ─── GitHub helpers ───────────────────────────────────────────────────────────
 function ghHeaders() {
@@ -206,7 +179,7 @@ bot.onText(/\/start/, (msg) => {
     'وعندما تريد تعديل كود أو رفعه على GitHub، فقط أخبرني.',
     '',
     `🔗 الريبو الحالي: ${repoInfo}`,
-    `🤖 الذكاء الاصطناعي: ${AI_TYPE === 'gemini' ? 'Gemini ✅' : 'Groq ✅'}`,
+    `🤖 الذكاء الاصطناعي: Groq (Llama 3.3) ✅`,
     '',
     '_لتغيير الريبو: أرسل رابط GitHub الجديد_',
     '_لتغيير التوكن: أرسل توكن ghp\\_ الجديد_',
@@ -322,4 +295,4 @@ bot.on('document', async (msg) => {
 bot.on('polling_error', (err) => console.error('Polling:', err.message));
 process.on('unhandledRejection', (err) => console.error('Unhandled:', err.message));
 
-console.log(`🤖 البوت يعمل — AI: ${AI_TYPE}`);
+console.log('🤖 البوت يعمل — AI: Groq (llama-3.3-70b)');
