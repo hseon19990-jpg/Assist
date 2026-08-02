@@ -10,7 +10,10 @@
 |--------|-------|
 | `TELEGRAM_BOT_TOKEN` | توكن البوت من @BotFather |
 | `TELEGRAM_OWNER_ID` | رقمك من @userinfobot |
-| `GROQ_API_KEY` | مفتاح Groq من https://console.groq.com (مجاني) |
+| `GEMINI_API_KEY` | مفتاح Gemini من https://aistudio.google.com/app/apikey |
+| `GROQ_API_KEY` | **بديل مجاني** من https://console.groq.com |
+
+> أضف **واحداً فقط**: إما `GEMINI_API_KEY` أو `GROQ_API_KEY`، البوت يتعرف عليهما تلقائياً.
 
 ---
 
