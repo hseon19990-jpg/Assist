@@ -1,14 +1,14 @@
 {
   "name": "tg-github-bot",
   "version": "3.0.0",
-  "description": "Telegram bot — edit GitHub files with Arabic instructions via Gemini AI",
+  "description": "Telegram bot — edit GitHub files via Groq AI",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.66.0",
-    "node-fetch": "^2.7.0"
+    "express": "^4.19.2",
+    "axios": "^1.7.9"
   },
   "engines": {
     "node": ">=18"
