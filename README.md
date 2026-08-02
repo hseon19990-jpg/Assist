@@ -10,7 +10,7 @@
 |--------|-------|
 | `TELEGRAM_BOT_TOKEN` | توكن البوت من @BotFather |
 | `TELEGRAM_OWNER_ID` | رقمك من @userinfobot |
-| `GEMINI_API_KEY` | مفتاح Gemini من https://aistudio.google.com/app/apikey (مجاني) |
+| `GROQ_API_KEY` | مفتاح Groq من https://console.groq.com (مجاني) |
 
 ---
 
