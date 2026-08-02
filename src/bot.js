@@ -1,6 +1,6 @@
 /**
  * بوت تيليجرام الذكي لتعديل GitHub
- * يستخدم Groq أو Gemini AI لفهم الطلبات وتنفيذها مباشرة
+ * نظام ثلاثي المراحل: تحليل → تخطيط → تنفيذ
  */
 
 const { Telegraf } = require('telegraf');
@@ -11,22 +11,21 @@ const path = require('path');
 // ============================================================
 //  إعدادات البيئة
 // ============================================================
-const BOT_TOKEN    = process.env.TELEGRAM_BOT_TOKEN;
-const OWNER_ID     = parseInt(process.env.TELEGRAM_OWNER_ID || '0');
-const GROQ_KEY     = process.env.GROQ_API_KEY;
-const GEMINI_KEY   = process.env.GEMINI_API_KEY;
-const GITHUB_TOKEN = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
-const GITHUB_OWNER = process.env.GITHUB_OWNER;
-const GITHUB_REPO  = process.env.GITHUB_REPO;
+const BOT_TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
+const OWNER_ID      = parseInt(process.env.TELEGRAM_OWNER_ID || '0');
+const GROQ_KEY      = process.env.GROQ_API_KEY;
+const GEMINI_KEY    = process.env.GEMINI_API_KEY;
+const GITHUB_TOKEN  = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+const GITHUB_OWNER  = process.env.GITHUB_OWNER;
+const GITHUB_REPO   = process.env.GITHUB_REPO;
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
 
-if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN غير موجود في متغيرات البيئة');
-if (!GROQ_KEY && !GEMINI_KEY) throw new Error('يجب توفير GROQ_API_KEY أو GEMINI_API_KEY');
+if (!BOT_TOKEN)                throw new Error('TELEGRAM_BOT_TOKEN غير موجود');
+if (!GROQ_KEY && !GEMINI_KEY)  throw new Error('يجب توفير GROQ_API_KEY أو GEMINI_API_KEY');
 
 const AI_PROVIDER = GROQ_KEY ? 'groq' : 'gemini';
-
-const FULL_REPO = `${GITHUB_OWNER}/${GITHUB_REPO}`;
-const GH_HEADERS = {
+const FULL_REPO   = `${GITHUB_OWNER}/${GITHUB_REPO}`;
+const GH_HEADERS  = {
   Authorization: `Bearer ${GITHUB_TOKEN}`,
   Accept: 'application/vnd.github+json',
   'X-GitHub-Api-Version': '2022-11-28',
@@ -35,41 +34,34 @@ const GH_HEADERS = {
 // ============================================================
 //  تخزين المسؤولين والسياق
 // ============================================================
-const ADMINS_FILE = path.join(__dirname, '..', 'admins.json');
-const HISTORY_LIMIT = 8; // عدد الرسائل المحفوظة في السياق لكل مستخدم
+const ADMINS_FILE   = path.join(__dirname, '..', 'admins.json');
+const HISTORY_LIMIT = 10;
 
 function loadAdmins() {
   try {
     if (fs.existsSync(ADMINS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(ADMINS_FILE, 'utf8'));
-      return new Set([OWNER_ID, ...data]);
+      return new Set([OWNER_ID, ...JSON.parse(fs.readFileSync(ADMINS_FILE, 'utf8'))]);
     }
   } catch (_) {}
   return new Set([OWNER_ID]);
 }
 
-function saveAdmins(adminSet) {
+function saveAdmins(set) {
   try {
-    const data = [...adminSet].filter(id => id !== OWNER_ID);
-    fs.writeFileSync(ADMINS_FILE, JSON.stringify(data), 'utf8');
+    fs.writeFileSync(ADMINS_FILE, JSON.stringify([...set].filter(id => id !== OWNER_ID)), 'utf8');
   } catch (_) {}
 }
 
 const admins = loadAdmins();
 
-// سياق المحادثة: userId → [{role, content}, ...]
+// سياق المحادثة لكل مستخدم
 const conversationHistory = new Map();
 
 function addToHistory(userId, role, content) {
-  if (!conversationHistory.has(userId)) {
-    conversationHistory.set(userId, []);
-  }
-  const history = conversationHistory.get(userId);
-  history.push({ role, content });
-  // الاحتفاظ بآخر HISTORY_LIMIT رسالة فقط
-  if (history.length > HISTORY_LIMIT) {
-    history.splice(0, history.length - HISTORY_LIMIT);
-  }
+  if (!conversationHistory.has(userId)) conversationHistory.set(userId, []);
+  const h = conversationHistory.get(userId);
+  h.push({ role, content: String(content).slice(0, 3000) }); // حد أقصى لكل رسالة
+  if (h.length > HISTORY_LIMIT) h.splice(0, h.length - HISTORY_LIMIT);
 }
 
 function getHistory(userId) {
@@ -80,17 +72,17 @@ function getHistory(userId) {
 //  GitHub helpers
 // ============================================================
 
+/** جلب شجرة الملفات الكاملة */
 async function getFileTree() {
   const url = `https://api.github.com/repos/${FULL_REPO}/git/trees/${GITHUB_BRANCH}?recursive=1`;
   const res = await axios.get(url, { headers: GH_HEADERS });
-  return res.data.tree
-    .filter(f => f.type === 'blob')
-    .map(f => f.path);
+  return res.data.tree.filter(f => f.type === 'blob').map(f => f.path);
 }
 
+/** قراءة ملف بمحتواه وـ sha */
 async function readFile(filePath) {
   try {
-    const url = `https://api.github.com/repos/${FULL_REPO}/contents/${filePath}?ref=${GITHUB_BRANCH}`;
+    const url = `https://api.github.com/repos/${FULL_REPO}/contents/${encodeURIComponent(filePath)}?ref=${GITHUB_BRANCH}`;
     const res = await axios.get(url, { headers: GH_HEADERS });
     return {
       content: Buffer.from(res.data.content, 'base64').toString('utf8'),
@@ -102,11 +94,12 @@ async function readFile(filePath) {
   }
 }
 
+/** كتابة أو تحديث ملف */
 async function writeFile(filePath, content, commitMsg, sha) {
-  const url = `https://api.github.com/repos/${FULL_REPO}/contents/${filePath}`;
+  const url = `https://api.github.com/repos/${FULL_REPO}/contents/${encodeURIComponent(filePath)}`;
   const payload = {
     message: commitMsg || `Update ${filePath} via AI bot`,
-    content: Buffer.from(content).toString('base64'),
+    content: Buffer.from(String(content)).toString('base64'),
     branch: GITHUB_BRANCH,
   };
   if (sha) payload.sha = sha;
@@ -114,12 +107,25 @@ async function writeFile(filePath, content, commitMsg, sha) {
   return res.data.content?.html_url || '';
 }
 
+/** حذف ملف */
 async function deleteFile(filePath, sha, commitMsg) {
-  const url = `https://api.github.com/repos/${FULL_REPO}/contents/${filePath}`;
+  const url = `https://api.github.com/repos/${FULL_REPO}/contents/${encodeURIComponent(filePath)}`;
   await axios.delete(url, {
     headers: GH_HEADERS,
     data: { message: commitMsg || `Delete ${filePath}`, sha, branch: GITHUB_BRANCH },
   });
+}
+
+/** قراءة عدة ملفات دفعة واحدة */
+async function readMultipleFiles(filePaths) {
+  const results = {};
+  await Promise.all(
+    filePaths.map(async fp => {
+      const f = await readFile(fp);
+      results[fp] = f ? f.content : null;
+    })
+  );
+  return results;
 }
 
 // ============================================================
@@ -131,10 +137,10 @@ async function callAI(messages, jsonMode = false) {
     const body = {
       model: 'llama-3.3-70b-versatile',
       messages,
-      temperature: 0.1,
+      temperature: 0.15,
+      max_tokens: 8192,
     };
     if (jsonMode) body.response_format = { type: 'json_object' };
-
     const res = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       body,
@@ -151,145 +157,215 @@ async function callAI(messages, jsonMode = false) {
         parts: [{ text: m.content }],
       }));
 
-    // دمج system prompt مع أول رسالة
     const systemMsg = messages.find(m => m.role === 'system');
     if (systemMsg && geminiMessages.length > 0) {
       geminiMessages[0].parts[0].text = systemMsg.content + '\n\n' + geminiMessages[0].parts[0].text;
     }
 
-    const body = {
-      contents: geminiMessages,
-      generationConfig: {
-        temperature: 0.1,
-        ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
-      },
-    };
-
-    const model = 'gemini-2.0-flash';
     const res = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
-      body,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+      {
+        contents: geminiMessages,
+        generationConfig: {
+          temperature: 0.15,
+          maxOutputTokens: 8192,
+          ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
+        },
+      },
       { headers: { 'Content-Type': 'application/json' } }
     );
     return res.data.candidates[0].content.parts[0].text.trim();
   }
 }
 
+function parseJSON(raw) {
+  const clean = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  return JSON.parse(clean);
+}
+
 // ============================================================
-//  تحليل الطلب بالذكاء الاصطناعي
+//  المرحلة الأولى: تحليل الطلب وتحديد الملفات المحتاجة
 // ============================================================
 
-async function understandRequest(userMessage, fileTree, userId) {
-  const systemPrompt = `أنت مطور برمجيات خبير ومساعد ذكي لإدارة مستودعات GitHub.
+async function phase1_analyze(userMsg, fileTree, history) {
+  const systemPrompt = `أنت محلل كود خبير. مهمتك فقط: فهم الطلب وتحديد الملفات المحتاجة للقراءة.
 
-المستودع الحالي: ${FULL_REPO} (فرع: ${GITHUB_BRANCH})
+المستودع: ${FULL_REPO} | الفرع: ${GITHUB_BRANCH}
 
-قائمة الملفات الموجودة في المستودع:
+قائمة الملفات:
 ${fileTree.join('\n')}
 
-مهمتك: تحليل طلب المستخدم وتحديد العمليات المطلوبة بدقة.
-
-أجب حصراً بـ JSON بهذا الشكل (لا تضف أي نص خارج JSON):
+أجب بـ JSON فقط (بدون أي نص خارجه):
 {
+  "task_type": "create_file" | "modify_file" | "delete_file" | "read_file" | "list_files" | "multi_operation" | "unclear",
+  "files_to_read": ["ملفات يجب قراءتها قبل التنفيذ — اقرأ كل ملف سيُعدَّل، وملفاته المرتبطة مثل package.json وملفات الإعدادات"],
+  "files_to_modify": ["الملفات التي ستُنشأ أو تُعدَّل"],
+  "files_to_delete": ["الملفات التي ستُحذف"],
+  "explanation_ar": "اشرح بجملة واحدة ما يريد المستخدم",
+  "missing_info": "إذا الطلب غامض جداً اكتب ما تحتاجه، وإلا اتركه فارغاً",
+  "needs_packages": true | false,
+  "complexity": "simple" | "medium" | "complex"
+}
+
+قواعد files_to_read:
+- اقرأ دائماً package.json إذا كان موجوداً
+- اقرأ كل ملف سيُعدَّل حتماً
+- اقرأ الملفات التي يستوردها الملف المستهدف إذا كانت ذات صلة
+- اقرأ README.md إذا كان الطلب عاماً أو غير محدد`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...history,
+    { role: 'user', content: userMsg },
+  ];
+
+  const raw = await callAI(messages, true);
+  return parseJSON(raw);
+}
+
+// ============================================================
+//  المرحلة الثانية: بناء الخطة الكاملة مع سياق الملفات
+// ============================================================
+
+async function phase2_plan(userMsg, analysis, fileContents, fileTree, history) {
+  // بناء سياق الملفات المقروءة
+  const fileContext = Object.entries(fileContents)
+    .filter(([, content]) => content !== null)
+    .map(([fp, content]) => {
+      const preview = content.length > 4000 ? content.slice(0, 4000) + '\n... [مقتطع]' : content;
+      return `\n=== ${fp} ===\n${preview}`;
+    })
+    .join('\n');
+
+  const systemPrompt = `أنت مطور برمجيات خبير ذو وعي كامل بالمشروع. تعمل مثل أفضل مساعد كود في العالم.
+
+المستودع: ${FULL_REPO} | الفرع: ${GITHUB_BRANCH}
+
+--- محتوى الملفات الحالية ---
+${fileContext || 'لا توجد ملفات مقروءة'}
+---
+
+قائمة كل ملفات المستودع:
+${fileTree.join('\n')}
+
+مهمتك: بناء خطة تفصيلية كاملة لتنفيذ الطلب.
+
+أجب بـ JSON فقط:
+{
+  "explanation_ar": "اشرح ما ستفعله بالتفصيل",
   "operations": [
     {
       "action": "create" | "update" | "delete" | "read" | "list",
       "file_path": "مسار الملف",
-      "content_instruction": "وصف دقيق لمحتوى الملف أو التعديل المطلوب",
-      "commit_message": "رسالة الـ commit بالإنجليزي"
+      "commit_message": "رسالة commit واضحة بالإنجليزي",
+      "content_plan": "وصف تفصيلي جداً لما يجب أن يحتويه الملف — اذكر كل وظيفة وكل تغيير مطلوب بدقة",
+      "preserve": ["أجزاء من الملف الحالي يجب الحفاظ عليها"],
+      "add": ["ما يجب إضافته"],
+      "remove": ["ما يجب حذفه"]
     }
   ],
-  "needs_content_generation": true | false,
-  "explanation_ar": "اشرح بالعربي ما ستفعله بجملة واحدة",
-  "missing_info": "اذكر هنا إذا كانت المعلومات غير كافية لتنفيذ الطلب، وإلا اترك فارغاً"
+  "missing_info": "إذا لا يمكن التنفيذ بدون معلومات إضافية",
+  "new_packages": ["حزم npm جديدة مطلوبة إذا وجدت"]
 }
 
 قواعد مهمة:
-- إذا طلب المستخدم تعديل ملف موجود، اذكر مسار الملف الصحيح من القائمة
-- إذا طلب محتوى وصفياً (مثل "أضف flask")، ضع وصفاً واضحاً في content_instruction
-- إذا الطلب غامض جداً، اطرح سؤالاً في missing_info
-- يمكن أن تكون العمليات متعددة في طلب واحد
-- action "list" لعرض الملفات، "read" لقراءة محتوى ملف`;
+- كن دقيقاً جداً في content_plan — هذا ما سيُبنى عليه الكود
+- حافظ على نمط الكود الموجود (نفس style، نفس التسمية)
+- إذا عدّلت ملفاً، تأكد من الحفاظ على كل الوظائف الأصلية ما لم يُطلب حذفها
+- إذا احتجت package جديد، أضف عملية update لـ package.json أيضاً`;
 
-  const history = getHistory(userId);
   const messages = [
     { role: 'system', content: systemPrompt },
     ...history,
-    { role: 'user', content: userMessage },
+    { role: 'user', content: `الطلب: ${userMsg}\n\nالتحليل الأولي: ${analysis.explanation_ar}` },
   ];
 
   const raw = await callAI(messages, true);
-
-  // تنظيف أي markdown حول JSON إذا أعادها النموذج
-  const jsonText = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-  return JSON.parse(jsonText);
+  return parseJSON(raw);
 }
 
 // ============================================================
-//  مصحح تلقائي للكود
+//  المرحلة الثالثة: توليد الكود الفعلي
 // ============================================================
-function sanitizeCode(code) {
-  // إزالة markdown code fences
-  code = code.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
 
-  // تصحيح template literals: أي string فيها ${...} يجب أن تكون backticks
-  code = code.replace(
-    /(['"])((?:[^'"\\]|\\.)*?\$\{(?:[^}]|\{[^}]*\})*\}(?:[^'"\\]|\\.)*?)\1/g,
-    (match, quote, inner) => `\`${inner}\``
-  );
+async function phase3_generate(op, existingContent, userMsg, history) {
+  const isCode = /\.(js|ts|jsx|tsx|mjs|cjs|py|go|rs|java|cpp|c|cs|php|rb|swift|kt)$/.test(op.file_path);
+  const isJson = op.file_path.endsWith('.json');
+  const isYaml = op.file_path.endsWith('.yml') || op.file_path.endsWith('.yaml');
 
-  code = code.replace(
-    /'((?:[^'\\]|\\.|\n)*?\$\{(?:[^}]|\{[^}]*\})*\}(?:[^'\\]|\\.|\n)*?)'/g,
-    (match, inner) => `\`${inner}\``
-  );
-  code = code.replace(
-    /"((?:[^"\\]|\\.|\n)*?\$\{(?:[^"\\]|\\.|\n)*?\}(?:[^"\\]|\\.|\n)*?)"/g,
-    (match, inner) => `\`${inner}\``
-  );
+  let systemInstructions = `أنت مطور خبير محترف. مهمتك: كتابة الكود الكامل والصحيح لهذا الملف.
 
-  return code;
-}
+قواعد صارمة:
+1. أعطِ المحتوى الكامل للملف فقط — بدون شرح، بدون markdown code fences، بدون أي نص قبله أو بعده
+2. تأكد أن الكود صحيح ويمكن تشغيله مباشرة
+3. حافظ على كل الوظائف الأصلية الموجودة ما لم يُطلب صراحةً حذفها
+4. استخدم نفس أسلوب الكود الموجود (نفس const/let، نفس arrow functions، إلخ)`;
 
-async function generateFileContent(instruction, filePath, existingContent, userId) {
-  const isJs = /\.(js|ts|jsx|tsx|mjs|cjs)$/.test(filePath);
+  if (isCode) {
+    systemInstructions += `
+5. للـ template literals: استخدم backtick (\`) عند وجود \${...} — ليس single quote أو double quote
+6. تأكد من صحة كل الـ imports والـ requires
+7. لا تترك TODO أو placeholder — اكتب الكود الكامل`;
+  }
 
-  const systemMsg = isJs
-    ? `أنت مطور Node.js خبير. أعطِ الكود فقط بدون شرح أو markdown code fences.
-قواعد صارمة جداً:
-- استخدم backtick (\`) للـ template literals التي فيها \${...} — وليس single quote أو double quote أبداً
-- مثال صحيح: const x = \`hello \${name}\`;
-- مثال خاطئ: const x = 'hello \${name}';
-- حافظ على كل backtick موجود في الكود الأصلي كما هو`
-    : 'أنت مطور خبير. أعطِ المحتوى فقط بدون شرح أو markdown.';
+  if (isJson) {
+    systemInstructions += `\n5. أعطِ JSON صحيحاً قابلاً للتحقق فقط`;
+  }
 
-  const prompt = existingContent
-    ? `الملف الحالي (${filePath}):\n${existingContent}\n\n---\nالتعديل المطلوب: ${instruction}\n\nأعطني الملف الكامل بعد التعديل فقط.`
-    : `أنشئ ملف "${filePath}" بناءً على: ${instruction}\n\nأعطني المحتوى فقط.`;
+  const contextSection = existingContent
+    ? `\nالملف الحالي:\n${existingContent.length > 6000 ? existingContent.slice(0, 6000) + '\n...[مقتطع]' : existingContent}`
+    : '';
 
-  const history = getHistory(userId);
+  const userPrompt = `الملف المطلوب: ${op.file_path}
+الطلب الأصلي: ${userMsg}
+خطة التنفيذ: ${op.content_plan}
+${op.add?.length ? `يجب إضافة: ${op.add.join(', ')}` : ''}
+${op.remove?.length ? `يجب حذف: ${op.remove.join(', ')}` : ''}
+${op.preserve?.length ? `يجب الحفاظ على: ${op.preserve.join(', ')}` : ''}
+${contextSection}
+
+اكتب المحتوى الكامل للملف الآن:`;
+
   const messages = [
-    { role: 'system', content: systemMsg },
-    ...history,
-    { role: 'user', content: prompt },
+    { role: 'system', content: systemInstructions },
+    ...history.slice(-4), // آخر 4 رسائل فقط لتوفير tokens
+    { role: 'user', content: userPrompt },
   ];
 
-  const raw = await callAI(messages, false);
-  return isJs ? sanitizeCode(raw) : raw.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+  let result = await callAI(messages, false);
+
+  // تنظيف markdown code fences
+  result = result.replace(/^```[\w]*\n?/gm, '').replace(/^```$/gm, '').trim();
+
+  // تصحيح template literals في ملفات الكود
+  if (isCode) {
+    result = fixTemplateLiterals(result);
+  }
+
+  return result;
+}
+
+/** مصحح template literals */
+function fixTemplateLiterals(code) {
+  code = code.replace(
+    /(['"])((?:[^'"\\]|\\.)*?\$\{(?:[^}]|\{[^}]*\})*\}(?:[^'"\\]|\\.)*?)\1/g,
+    (_, __, inner) => `\`${inner}\``
+  );
+  code = code.replace(
+    /'((?:[^'\\]|\\.|\n)*?\$\{(?:[^}]|\{[^}]*\})*\}(?:[^'\\]|\\.|\n)*?)'/g,
+    (_, inner) => `\`${inner}\``
+  );
+  return code;
 }
 
 // ============================================================
 //  إرسال رسائل طويلة بأمان
 // ============================================================
 
-/**
- * يقسم النص عند حدود الأسطر بدلاً من القطع العشوائي
- * لتفادي كسر صياغة Markdown
- */
 function splitMessage(text, limit = 4000) {
   const chunks = [];
   const lines = text.split('\n');
   let current = '';
-
   for (const line of lines) {
     if ((current + '\n' + line).length > limit) {
       if (current) chunks.push(current.trim());
@@ -302,14 +378,10 @@ function splitMessage(text, limit = 4000) {
   return chunks;
 }
 
-/**
- * إرسال رسالة مع fallback لـ plain text إذا فشل Markdown
- */
 async function safeSend(ctx, text, extra = {}) {
   try {
     return await ctx.reply(text, { parse_mode: 'Markdown', disable_web_page_preview: true, ...extra });
   } catch (_) {
-    // إذا فشل Markdown، أرسل بدونه
     return await ctx.reply(text, { disable_web_page_preview: true, ...extra });
   }
 }
@@ -321,9 +393,7 @@ async function safeEdit(ctx, messageId, text) {
       { parse_mode: 'Markdown', disable_web_page_preview: true }
     );
   } catch (_) {
-    try {
-      return await ctx.telegram.editMessageText(ctx.chat.id, messageId, null, text);
-    } catch (__) {}
+    try { return await ctx.telegram.editMessageText(ctx.chat.id, messageId, null, text); } catch (__) {}
   }
 }
 
@@ -333,168 +403,206 @@ async function safeEdit(ctx, messageId, text) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// حماية: فقط المسؤولون يمكنهم استخدام البوت
 bot.use(async (ctx, next) => {
-  const uid = ctx.from?.id;
-  if (!admins.has(uid)) {
-    return ctx.reply('🚫 هذا البوت خاص.');
-  }
+  if (!admins.has(ctx.from?.id)) return ctx.reply('🚫 هذا البوت خاص.');
   return next();
 });
 
 bot.start(ctx => safeSend(ctx,
-  `مرحباً\\! أنا مساعدك الذكي لإدارة مستودع GitHub 🤖\n\n` +
-  `*المستودع المربوط:* \`${FULL_REPO}\`\n` +
+  `مرحباً! أنا مساعدك الذكي لإدارة مستودع GitHub 🤖\n\n` +
+  `*المستودع:* \`${FULL_REPO}\`\n` +
   `*الفرع:* \`${GITHUB_BRANCH}\`\n` +
   `*الذكاء الاصطناعي:* \`${AI_PROVIDER.toUpperCase()}\`\n\n` +
-  `فقط أخبرني ماذا تريد بأي صيغة، مثلاً:\n\n` +
-  `📝 \`أضف ملف requirements.txt فيه flask وrequests\`\n` +
-  `✏️ \`عدّل index.js وأضف console.log في البداية\`\n` +
-  `👁️ \`اقرأ ملف package.json\`\n` +
+  `أرسل طلبك بأي صيغة تريد:\n\n` +
+  `📝 \`أضف نظام تسجيل دخول بـ JWT\`\n` +
+  `✏️ \`عدّل bot.js وأضف أمر /stats\`\n` +
+  `👁️ \`اقرأ ملف index.js\`\n` +
   `📋 \`اعرض كل الملفات\`\n` +
   `🗑️ \`احذف ملف old.js\`\n\n` +
-  `لا تحتاج توكن أو رابط — كل شيء جاهز! ✅`
+  `أفهم السياق الكامل للمشروع قبل أي تعديل ✅`
 ));
 
 bot.help(ctx => safeSend(ctx,
   `*دليل الاستخدام:*\n\n` +
-  `أرسل طلبك بالعربي أو الإنجليزي بأي صيغة تريد.\n\n` +
-  `*أمثلة:*\n` +
-  `• \`أضف ملف config.py فيه الإعدادات الأساسية\`\n` +
-  `• \`عدّل README وأضف قسم التثبيت\`\n` +
-  `• \`اعرض الملفات في مجلد src\`\n` +
-  `• \`احذف ملف test.js\`\n` +
-  `• \`أضف Docker support للمشروع\`\n\n` +
-  `*/start* — الرسالة الرئيسية\n` +
+  `أرسل طلبك بالعربي أو الإنجليزي — سأفهم المشروع كاملاً أولاً.\n\n` +
+  `*/start* — رسالة الترحيب\n` +
   `*/repo* — معلومات المستودع\n` +
+  `*/files* — عرض كل الملفات\n` +
   `*/clear* — مسح سياق المحادثة\n` +
-  `*/admin [ID]* — أضف مسؤول`
+  `*/admin [ID]* — إضافة مسؤول\n` +
+  `*/removeadmin [ID]* — إزالة مسؤول`
 ));
 
 bot.command('repo', async ctx => {
   try {
-    const res = await axios.get(
-      `https://api.github.com/repos/${FULL_REPO}`,
-      { headers: GH_HEADERS }
-    );
+    const res = await axios.get(`https://api.github.com/repos/${FULL_REPO}`, { headers: GH_HEADERS });
     const d = res.data;
     await safeSend(ctx,
       `*📁 معلومات المستودع:*\n\n` +
       `🔗 \`${d.full_name}\`\n` +
       `🌿 الفرع: \`${GITHUB_BRANCH}\`\n` +
-      `📝 الوصف: ${d.description || 'لا يوجد'}\n` +
-      `🔒 ${d.private ? 'خاص' : 'عام'}\n` +
-      `⭐ ${d.stargazers_count} نجمة\n` +
-      `🔤 اللغة: ${d.language || 'متعددة'}\n` +
-      `🤖 الذكاء الاصطناعي: ${AI_PROVIDER.toUpperCase()}`
+      `📝 ${d.description || 'لا يوجد وصف'}\n` +
+      `🔒 ${d.private ? 'خاص' : 'عام'} | ⭐ ${d.stargazers_count}\n` +
+      `🔤 ${d.language || 'متعددة اللغات'}\n` +
+      `🤖 ${AI_PROVIDER.toUpperCase()}`
     );
   } catch (e) {
-    ctx.reply(`❌ خطأ في جلب معلومات المستودع: ${e.message}`);
+    ctx.reply(`❌ خطأ: ${e.message}`);
+  }
+});
+
+bot.command('files', async ctx => {
+  try {
+    const tree = await getFileTree();
+    const display = tree.slice(0, 80).map(f => `📄 \`${f}\``).join('\n');
+    const text = `*📋 ملفات المستودع (${tree.length}):*\n\n${display}` +
+      (tree.length > 80 ? `\n\n_...و ${tree.length - 80} ملف آخر_` : '');
+    await safeSend(ctx, text);
+  } catch (e) {
+    ctx.reply(`❌ خطأ: ${e.message}`);
   }
 });
 
 bot.command('clear', async ctx => {
-  const uid = ctx.from?.id;
-  conversationHistory.delete(uid);
+  conversationHistory.delete(ctx.from?.id);
   ctx.reply('🧹 تم مسح سياق المحادثة. ابدأ من جديد!');
 });
 
 bot.command('admin', async ctx => {
-  const uid = ctx.from?.id;
-  if (uid !== OWNER_ID) {
-    return ctx.reply('🚫 فقط المالك يمكنه إضافة مسؤولين جدد.');
-  }
-  const newAdmin = ctx.message.text.split(' ')[1];
-  if (!newAdmin || isNaN(parseInt(newAdmin))) {
-    return ctx.reply('👉 يرجى ذكر معرف المستخدم الرقمي.\nمثال: /admin 123456789');
-  }
-  const newId = parseInt(newAdmin);
-  if (admins.has(newId)) {
-    return ctx.reply(`ℹ️ المستخدم ${newAdmin} مسؤول بالفعل.`);
-  }
-  admins.add(newId);
+  if (ctx.from?.id !== OWNER_ID) return ctx.reply('🚫 فقط المالك.');
+  const id = parseInt(ctx.message.text.split(' ')[1]);
+  if (!id) return ctx.reply('مثال: /admin 123456789');
+  if (admins.has(id)) return ctx.reply('ℹ️ مسؤول بالفعل.');
+  admins.add(id);
   saveAdmins(admins);
-  ctx.reply(`✅ تمت إضافة المستخدم ${newAdmin} كمسؤول (محفوظ بشكل دائم).`);
+  ctx.reply(`✅ تم إضافة ${id} مسؤولاً.`);
 });
 
 bot.command('removeadmin', async ctx => {
-  const uid = ctx.from?.id;
-  if (uid !== OWNER_ID) {
-    return ctx.reply('🚫 فقط المالك يمكنه إزالة المسؤولين.');
-  }
-  const targetId = parseInt(ctx.message.text.split(' ')[1]);
-  if (!targetId || targetId === OWNER_ID) {
-    return ctx.reply('👉 أدخل معرف المسؤول المراد إزالته (لا يمكن إزالة المالك).');
-  }
-  admins.delete(targetId);
+  if (ctx.from?.id !== OWNER_ID) return ctx.reply('🚫 فقط المالك.');
+  const id = parseInt(ctx.message.text.split(' ')[1]);
+  if (!id || id === OWNER_ID) return ctx.reply('أدخل معرف صالح (لا يمكن إزالة المالك).');
+  admins.delete(id);
   saveAdmins(admins);
-  ctx.reply(`✅ تمت إزالة المستخدم ${targetId} من المسؤولين.`);
+  ctx.reply(`✅ تمت إزالة ${id}.`);
 });
 
 // ============================================================
-//  معالجة الرسائل الرئيسية
+//  المعالج الرئيسي — نظام ثلاثي المراحل
 // ============================================================
 
 bot.on('text', async ctx => {
   const userMsg = ctx.message.text;
-  // تجاهل الأوامر (لأن Telegraf قد يمررها هنا أيضاً)
   if (userMsg.startsWith('/')) return;
 
   const userId = ctx.from?.id;
   let statusMsg;
 
   try {
-    statusMsg = await ctx.reply('🔍 جاري تحليل طلبك...');
+    statusMsg = await ctx.reply('🔍 جاري قراءة المشروع...');
 
     // جلب شجرة الملفات
     let fileTree = [];
-    try {
-      fileTree = await getFileTree();
-    } catch (_) {
-      // المستودع قد يكون فارغاً
-    }
+    try { fileTree = await getFileTree(); } catch (_) {}
 
-    // تحليل الطلب بالذكاء الاصطناعي
-    const analysis = await understandRequest(userMsg, fileTree, userId);
+    const history = getHistory(userId);
 
-    // حفظ رسالة المستخدم في السياق
-    addToHistory(userId, 'user', userMsg);
+    // ─── المرحلة الأولى: تحليل الطلب ──────────────────────
+    await safeEdit(ctx, statusMsg.message_id, '🧠 المرحلة 1/3: تحليل الطلب...');
+    const analysis = await phase1_analyze(userMsg, fileTree, history);
 
-    // إذا كانت المعلومات ناقصة
-    if (analysis.missing_info && analysis.missing_info.trim()) {
-      await safeEdit(ctx, statusMsg.message_id,
-        `⚠️ *أحتاج توضيحاً:*\n\n${analysis.missing_info}`
-      );
+    if (analysis.missing_info?.trim()) {
+      await safeEdit(ctx, statusMsg.message_id, `⚠️ *أحتاج توضيحاً:*\n\n${analysis.missing_info}`);
+      addToHistory(userId, 'user', userMsg);
       addToHistory(userId, 'assistant', analysis.missing_info);
       return;
     }
 
-    const ops = analysis.operations || [];
+    // action بسيطة لا تحتاج تخطيطاً عميقاً
+    if (analysis.task_type === 'list_files') {
+      const filtered = fileTree.slice(0, 80).map(f => `📄 \`${f}\``).join('\n');
+      await safeEdit(ctx, statusMsg.message_id,
+        `*📋 ملفات المستودع (${fileTree.length}):*\n\n${filtered}` +
+        (fileTree.length > 80 ? `\n\n_...و ${fileTree.length - 80} آخر_` : '')
+      );
+      addToHistory(userId, 'user', userMsg);
+      return;
+    }
+
+    if (analysis.task_type === 'read_file') {
+      const fp = analysis.files_to_read[0] || analysis.files_to_modify[0];
+      if (!fp) {
+        await safeEdit(ctx, statusMsg.message_id, '❌ لم أستطع تحديد الملف. حدده بالاسم.');
+        return;
+      }
+      const file = await readFile(fp);
+      if (!file) {
+        await safeEdit(ctx, statusMsg.message_id, `❌ الملف \`${fp}\` غير موجود.`);
+        return;
+      }
+      const preview = file.content.length > 3000
+        ? file.content.slice(0, 3000) + '\n\n_...تم اقتصار المحتوى (الملف أطول)_'
+        : file.content;
+      const msg = `*📄 ${fp}:*\n\`\`\`\n${preview}\n\`\`\``;
+      if (msg.length > 4000) {
+        await safeEdit(ctx, statusMsg.message_id, '📄 محتوى الملف:');
+        for (const chunk of splitMessage(msg)) await safeSend(ctx, chunk);
+      } else {
+        await safeEdit(ctx, statusMsg.message_id, msg);
+      }
+      addToHistory(userId, 'user', userMsg);
+      return;
+    }
+
+    // ─── المرحلة الثانية: قراءة الملفات وبناء الخطة ──────
+    await safeEdit(ctx, statusMsg.message_id, '📖 المرحلة 2/3: قراءة السياق وبناء الخطة...');
+
+    const filesToRead = [
+      ...new Set([
+        ...(analysis.files_to_read || []),
+        ...(analysis.files_to_modify || []),
+      ])
+    ].filter(f => fileTree.includes(f));
+
+    const fileContents = filesToRead.length > 0 ? await readMultipleFiles(filesToRead) : {};
+
+    const plan = await phase2_plan(userMsg, analysis, fileContents, fileTree, history);
+
+    if (plan.missing_info?.trim()) {
+      await safeEdit(ctx, statusMsg.message_id, `⚠️ *أحتاج توضيحاً:*\n\n${plan.missing_info}`);
+      addToHistory(userId, 'user', userMsg);
+      addToHistory(userId, 'assistant', plan.missing_info);
+      return;
+    }
+
+    const ops = plan.operations || [];
     if (!ops.length) {
       await safeEdit(ctx, statusMsg.message_id,
-        `🤔 لم أفهم الطلب. حاول بصياغة أوضح مثل:\n\`أضف ملف x.py\` أو \`اعرض الملفات\``
+        '🤔 لم أتمكن من بناء خطة واضحة. حاول بصياغة أوضح.'
       );
       return;
     }
 
-    // إخبار المستخدم بما سيتم فعله
+    // إخبار المستخدم بالخطة
+    const opsSummary = ops.map(o => {
+      const icon = o.action === 'create' ? '🆕' : o.action === 'update' ? '✏️' : o.action === 'delete' ? '🗑️' : '📖';
+      return `${icon} \`${o.file_path}\``;
+    }).join('\n');
     await safeEdit(ctx, statusMsg.message_id,
-      `⚙️ ${analysis.explanation_ar}\n\nجاري التنفيذ...`
+      `⚙️ *الخطة:* ${plan.explanation_ar}\n\n${opsSummary}\n\n⏳ المرحلة 3/3: التنفيذ...`
     );
 
+    // ─── المرحلة الثالثة: التنفيذ ──────────────────────────
     const results = [];
 
     for (const op of ops) {
       try {
         if (op.action === 'list') {
-          const tree = fileTree.length ? fileTree : await getFileTree();
-          const filtered = op.file_path
-            ? tree.filter(f => f.startsWith(op.file_path))
-            : tree;
+          const filtered = op.file_path ? fileTree.filter(f => f.startsWith(op.file_path)) : fileTree;
           const display = filtered.slice(0, 60).map(f => `📄 \`${f}\``).join('\n');
           results.push(
             `*📋 الملفات (${filtered.length}):*\n${display}` +
-            (filtered.length > 60 ? `\n_...و ${filtered.length - 60} ملف آخر_` : '')
+            (filtered.length > 60 ? `\n_...و ${filtered.length - 60} أخرى_` : '')
           );
 
         } else if (op.action === 'read') {
@@ -503,7 +611,7 @@ bot.on('text', async ctx => {
             results.push(`❌ الملف \`${op.file_path}\` غير موجود`);
           } else {
             const preview = file.content.length > 2500
-              ? file.content.slice(0, 2500) + '\n\n_...تم اقتصار المحتوى_'
+              ? file.content.slice(0, 2500) + '\n_...مقتطع_'
               : file.content;
             results.push(`*📄 ${op.file_path}:*\n\`\`\`\n${preview}\n\`\`\``);
           }
@@ -518,85 +626,70 @@ bot.on('text', async ctx => {
           }
 
         } else if (op.action === 'create' || op.action === 'update') {
-          const existing = await readFile(op.file_path);
-          const isUpdate = op.action === 'update' || !!existing;
+          // استخدم المحتوى المقروء مسبقاً إذا توفر
+          const existingData = fileContents[op.file_path]
+            ? { content: fileContents[op.file_path], sha: null }
+            : await readFile(op.file_path);
 
-          // إذا لم يكن هناك محتوى جاهز أو طُلب توليد محتوى → ولّد دائماً
-          const shouldGenerate = analysis.needs_content_generation || !op.content_instruction;
+          const isUpdate = op.action === 'update' || !!existingData;
 
-          let content;
-          if (shouldGenerate) {
-            if (!op.content_instruction && !existing) {
-              results.push(`❌ لا يوجد وصف كافٍ لإنشاء \`${op.file_path}\`. أعد الطلب بمزيد من التفاصيل.`);
-              continue;
-            }
-            content = await generateFileContent(
-              op.content_instruction || `عدّل الملف حسب طلب المستخدم: ${userMsg}`,
-              op.file_path,
-              existing?.content || null,
-              userId
-            );
-          } else {
-            content = op.content_instruction;
-          }
+          // توليد المحتوى مع كامل السياق
+          const content = await phase3_generate(
+            op,
+            existingData?.content || null,
+            userMsg,
+            history
+          );
 
-          // ضمان أن المحتوى سلسلة نصية قابلة للكتابة
-          if (content === null || content === undefined || content === '') {
-            results.push(`❌ فشل توليد محتوى \`${op.file_path}\`. حاول مرة أخرى بوصف أوضح.`);
+          if (!content || content.trim() === '') {
+            results.push(`❌ فشل توليد محتوى \`${op.file_path}\`. أعد المحاولة.`);
             continue;
           }
 
-          const url = await writeFile(
-            op.file_path,
-            String(content),
-            op.commit_message,
-            existing?.sha || null
-          );
+          // إذا sha غير معروف، اجلبه
+          let sha = existingData?.sha || null;
+          if (!sha && existingData) {
+            const fresh = await readFile(op.file_path);
+            sha = fresh?.sha || null;
+          }
 
+          const url = await writeFile(op.file_path, content, op.commit_message, sha);
           const verb = isUpdate ? 'تعديل' : 'إضافة';
           results.push(
             `✅ تم ${verb} \`${op.file_path}\`\n` +
-            `💬 Commit: \`${op.commit_message}\`\n` +
-            (url ? `🔗 [فتح على GitHub](${url})` : '')
+            `💬 \`${op.commit_message}\`\n` +
+            (url ? `🔗 [GitHub](${url})` : '')
           );
         }
       } catch (opErr) {
-        const errMsg = opErr.response?.data?.message || opErr.message;
-        results.push(`❌ خطأ في \`${op.file_path || 'العملية'}\`: ${errMsg}`);
+        const msg = opErr.response?.data?.message || opErr.message;
+        results.push(`❌ خطأ في \`${op.file_path || 'العملية'}\`: ${msg}`);
       }
     }
 
-    // حفظ رد الذكاء الاصطناعي في السياق
-    const summaryForHistory = results.map(r => r.replace(/\`\`\`[\s\S]*?\`\`\`/g, '[كود]')).join(' | ');
-    addToHistory(userId, 'assistant', `${analysis.explanation_ar} — النتيجة: ${summaryForHistory}`);
+    // حفظ في السياق
+    addToHistory(userId, 'user', userMsg);
+    addToHistory(userId, 'assistant',
+      `نفّذت: ${plan.explanation_ar}. الملفات: ${ops.map(o => o.file_path).join(', ')}`
+    );
 
-    // إرسال النتائج
     const finalText = results.join('\n\n---\n\n');
-
     if (finalText.length > 4000) {
       await safeEdit(ctx, statusMsg.message_id, '✅ اكتملت العمليات:');
-      const chunks = splitMessage(finalText);
-      for (const chunk of chunks) {
-        await safeSend(ctx, chunk);
-      }
+      for (const chunk of splitMessage(finalText)) await safeSend(ctx, chunk);
     } else {
       await safeEdit(ctx, statusMsg.message_id, finalText);
     }
 
   } catch (err) {
     console.error('Error:', err.response?.data || err.message);
-    const errText = err.response?.data?.message || err.message;
-
     const isRateLimit = err.response?.status === 429;
-    const userFriendly = isRateLimit
+    const msg = isRateLimit
       ? '⏳ تم تجاوز حد الطلبات. انتظر لحظة ثم أعد المحاولة.'
-      : `❌ حدث خطأ:\n\`${errText}\``;
+      : `❌ حدث خطأ:\n\`${err.response?.data?.message || err.message}\``;
 
-    if (statusMsg) {
-      await safeEdit(ctx, statusMsg.message_id, userFriendly).catch(() => {});
-    } else {
-      await ctx.reply(userFriendly);
-    }
+    if (statusMsg) await safeEdit(ctx, statusMsg.message_id, msg).catch(() => {});
+    else await ctx.reply(msg);
   }
 });
 
