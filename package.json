@@ -1,0 +1,16 @@
+{
+  "name": "tg-github-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot to push files to GitHub",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
