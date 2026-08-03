@@ -2,30 +2,25 @@
 بوت Telegram ذكي — مساعد شخصي متكامل
 ========================================
 المتغيرات المطلوبة في Railway:
-  BOT_TOKEN      — توكن البوت من @BotFather
-  OPENAI_API_KEY — مفتاح OpenAI API
-  OWNER_ID       — ايدي مالك البوت (اختياري)
-  OPENAI_MODEL   — النموذج (افتراضي: gpt-4o)
+  TELEGRAM_BOT_TOKEN      — توكن البوت من @BotFather
+  GEMINI_API_KEY          — مفتاح Google Gemini API
+  TELEGRAM_OWNER_ID       — ايدي مالك البوت (اختياري)
+  GEMINI_MODEL            — النموذج (افتراضي: gemini-2.0-flash-exp)
 """
 
-import os, re, json, asyncio, logging, traceback, html, io, tempfile
-from datetime import datetime
+import os, re, json, asyncio, logging, traceback, base64
 from typing import Optional
 
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    BotCommand, BotCommandScopeChat,
-)
+from telegram import Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters,
+    ContextTypes, filters,
 )
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import NetworkError, TimedOut, RetryAfter
+from telegram.error import NetworkError, TimedOut
 from telegram.request import HTTPXRequest
 
 import httpx
-from openai import AsyncOpenAI
 
 # ─── إعداد اللوقينج ───────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -35,65 +30,142 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── المتغيرات البيئية ────────────────────────────────────────────────────────
-BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OWNER_ID       = int(os.environ.get("OWNER_ID", "0") or 0)
-MODEL          = os.environ.get("OPENAI_MODEL", "gpt-4o")
-MAX_HISTORY    = int(os.environ.get("MAX_HISTORY", "30"))
+BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+GEMINI_KEY  = os.environ.get("GEMINI_API_KEY", "")
+OWNER_ID    = int(os.environ.get("TELEGRAM_OWNER_ID", "0") or 0)
+MODEL       = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-exp")
+MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "30"))
 
-# ─── تهيئة OpenAI ─────────────────────────────────────────────────────────────
-ai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
 
-# ─── ذاكرة المحادثات لكل مستخدم ──────────────────────────────────────────────
+# ─── ذاكرة المحادثات ──────────────────────────────────────────────────────────
 conversations: dict[int, list[dict]] = {}
 
 # ─── Prompt النظام ────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """أنت مساعد ذكي متقدم ومتطور جداً يشبه Replit Agent في قدراته. 
+SYSTEM_PROMPT = """أنت مساعد ذكي متقدم جداً، خبير في البرمجة والتقنية.
 
 قدراتك:
-- كتابة ومراجعة وإصلاح الكود بأي لغة برمجية (Python, JavaScript, TypeScript, Go, Rust, C++, Java, إلخ)
+- كتابة ومراجعة وإصلاح الكود بأي لغة (Python, JS, TS, Go, Rust, Java, C++, إلخ)
 - شرح المفاهيم التقنية والبرمجية بعمق ووضوح
-- تحليل الكود وإيجاد الأخطاء (bugs) واقتراح التحسينات
-- تصميم قواعد البيانات والـ schemas
-- مساعدة في DevOps (Docker, Railway, GitHub Actions, CI/CD)
-- تحليل الملفات والصور المرسلة
+- تصميم قواعد البيانات والـ APIs
+- مساعدة في DevOps (Docker, Railway, GitHub Actions)
+- تحليل الكود وإيجاد الأخطاء واقتراح التحسينات
 - تذكر كامل سياق المحادثة
-- تقديم حلول كاملة وجاهزة للتطبيق (لا تختصر الكود أبداً)
 
-أسلوبك:
+قواعد ثابتة:
 - أجب دائماً بنفس لغة السؤال (عربي أو إنجليزي)
-- استخدم Markdown في ردودك — الكود داخل backticks دائماً
-- أعطِ الكود الكامل دائماً، لا تكتب "..." أو "// rest of code"
-- كن دقيقاً ومفصّلاً، لا تختصر التفسيرات المهمة
+- استخدم Markdown — الكود دائماً داخل backticks
+- أعطِ الكود الكامل دائماً، لا تكتب "..." أو تختصر أبداً
 - عند إصلاح خطأ، اشرح سببه وليس فقط الحل
-- تعامل مع كل سؤال كأنه مهم وجدير بالاهتمام الكامل"""
+- كن دقيقاً ومفصلاً، لا تختصر الشرح المهم"""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Gemini API
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_gemini_payload(history: list[dict], system: str) -> dict:
+    """بناء payload لـ Gemini API من تاريخ المحادثة."""
+    contents = []
+    for msg in history:
+        role = "user" if msg["role"] == "user" else "model"
+        content = msg["content"]
+        # إذا كان المحتوى قائمة (صور) نتعامل معه كـ parts
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if item.get("type") == "text":
+                    parts.append({"text": item["text"]})
+                elif item.get("type") == "image_url":
+                    url = item["image_url"]["url"]
+                    if url.startswith("data:"):
+                        # base64 image
+                        mime, data = url.split(";base64,")
+                        mime = mime.replace("data:", "")
+                        parts.append({"inline_data": {"mime_type": mime, "data": data}})
+            contents.append({"role": role, "parts": parts})
+        else:
+            contents.append({"role": role, "parts": [{"text": str(content)}]})
+    
+    return {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": 8192,
+            "temperature": 0.7,
+        },
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ],
+    }
+
+
+async def ask_gemini(user_id: int, history_override: list = None) -> str:
+    """إرسال طلب لـ Gemini وإرجاع الرد."""
+    history = history_override or conversations.get(user_id, [])
+    
+    if not history:
+        return "أرسل رسالتك!"
+    
+    payload = build_gemini_payload(history, SYSTEM_PROMPT)
+    
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                GEMINI_URL,
+                params={"key": GEMINI_KEY},
+                json=payload,
+            )
+        
+        if resp.status_code != 200:
+            err = resp.text[:300]
+            logger.error(f"Gemini error {resp.status_code}: {err}")
+            if "API_KEY" in err or "401" in str(resp.status_code):
+                return "❌ مفتاح GEMINI_API_KEY غير صحيح أو منتهي الصلاحية."
+            if "quota" in err.lower() or "429" in str(resp.status_code):
+                return "⏳ تجاوزنا الحد المسموح من Gemini. انتظر دقيقة وأعد المحاولة."
+            return f"❌ خطأ من Gemini ({resp.status_code}): {err}"
+        
+        data = resp.json()
+        candidates = data.get("candidates", [])
+        if not candidates:
+            # تحقق من blocked
+            block = data.get("promptFeedback", {}).get("blockReason", "")
+            if block:
+                return f"⚠️ تم حجب الرد من Gemini: {block}"
+            return "لم أتمكن من الرد. حاول مرة أخرى."
+        
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return text or "لم أتمكن من الرد."
+    
+    except httpx.TimeoutException:
+        return "⏳ انتهت مهلة الاتصال بـ Gemini. حاول مرة أخرى."
+    except Exception as e:
+        logger.error(f"Gemini exception: {e}")
+        return f"❌ خطأ في الاتصال بـ Gemini: {str(e)[:150]}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  أدوات مساعدة
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_history(user_id: int) -> list[dict]:
-    """إرجاع تاريخ المحادثة للمستخدم."""
-    return conversations.setdefault(user_id, [])
-
-
 def add_message(user_id: int, role: str, content) -> None:
-    """إضافة رسالة لتاريخ المحادثة مع تقليم التاريخ القديم."""
-    history = get_history(user_id)
+    history = conversations.setdefault(user_id, [])
     history.append({"role": role, "content": content})
-    # احتفظ بآخر MAX_HISTORY رسالة فقط
     if len(history) > MAX_HISTORY:
         conversations[user_id] = history[-MAX_HISTORY:]
 
 
 def clear_history(user_id: int) -> None:
-    """مسح تاريخ المحادثة."""
     conversations[user_id] = []
 
 
-async def web_search(query: str, max_results: int = 5) -> str:
-    """بحث سريع عبر DuckDuckGo (بدون API key)."""
+async def web_search(query: str) -> str:
+    """بحث سريع عبر DuckDuckGo."""
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             resp = await client.get(
@@ -103,33 +175,28 @@ async def web_search(query: str, max_results: int = 5) -> str:
             data = resp.json()
         
         results = []
-        # النتيجة الرئيسية
         if data.get("AbstractText"):
             results.append(f"📌 {data['AbstractText']}")
-        # النتائج الجانبية
-        for r in data.get("RelatedTopics", [])[:max_results]:
+        for r in data.get("RelatedTopics", [])[:4]:
             if isinstance(r, dict) and r.get("Text"):
                 results.append(f"• {r['Text']}")
         
-        if results:
-            return "نتائج البحث:\n" + "\n".join(results[:5])
-        return f"لم أجد نتائج مباشرة عن '{query}'. سأجيبك من معلوماتي."
+        return ("نتائج البحث:\n" + "\n".join(results)) if results else f"لم أجد نتائج مباشرة عن '{query}'."
     except Exception as e:
-        logger.warning(f"Web search failed: {e}")
-        return f"تعذّر البحث في الإنترنت. سأجيبك من معلوماتي."
+        logger.warning(f"Search error: {e}")
+        return "تعذّر البحث. سأجيب من معلوماتي."
 
 
 async def execute_code(language: str, code: str) -> str:
-    """تنفيذ الكود عبر Piston API (مجاني، بدون API key)."""
+    """تنفيذ الكود عبر Piston API."""
     LANG_MAP = {
         "python": "python", "py": "python",
         "javascript": "javascript", "js": "javascript",
         "typescript": "typescript", "ts": "typescript",
-        "go": "go", "rust": "rust",
-        "java": "java", "cpp": "c++", "c++": "c++",
-        "c": "c", "bash": "bash", "sh": "bash",
-        "ruby": "ruby", "rb": "ruby",
-        "php": "php", "swift": "swift",
+        "go": "go", "rust": "rust", "java": "java",
+        "cpp": "c++", "c++": "c++", "c": "c",
+        "bash": "bash", "sh": "bash",
+        "ruby": "ruby", "rb": "ruby", "php": "php",
     }
     lang = LANG_MAP.get(language.lower(), language.lower())
     
@@ -141,71 +208,41 @@ async def execute_code(language: str, code: str) -> str:
                     "language": lang,
                     "version": "*",
                     "files": [{"content": code}],
-                    "stdin": "",
-                    "args": [],
-                    "compile_timeout": 10000,
                     "run_timeout": 5000,
                 },
             )
             result = resp.json()
         
         run = result.get("run", {})
-        out = run.get("stdout", "").strip()
-        err = run.get("stderr", "").strip()
+        out = (run.get("stdout") or "").strip()
+        err = (run.get("stderr") or "").strip()
         
         if err and not out:
             return f"❌ خطأ:\n```\n{err[:1500]}\n```"
         if out:
-            output = out[:1500]
+            res = f"✅ النتيجة:\n```\n{out[:1500]}\n```"
             if err:
-                output += f"\n⚠️ تحذيرات:\n{err[:500]}"
-            return f"✅ النتيجة:\n```\n{output}\n```"
-        return "✅ تم تنفيذ الكود بنجاح (بدون مخرجات)"
+                res += f"\n⚠️ تحذيرات:\n```\n{err[:500]}\n```"
+            return res
+        return "✅ تم التنفيذ بنجاح (بدون مخرجات)"
     except Exception as e:
-        return f"❌ تعذّر تنفيذ الكود: {e}"
+        return f"❌ تعذّر التنفيذ: {str(e)[:100]}"
 
 
-def detect_code_language(text: str) -> Optional[str]:
-    """كشف لغة الكود من المحادثة."""
-    pattern = r"```(\w+)?\n([\s\S]+?)```"
-    matches = re.findall(pattern, text)
-    if matches:
-        lang, code = matches[0]
-        return lang or "python", code
-    return None, None
-
-
-async def ask_ai(user_id: int, messages_override: list = None) -> str:
-    """إرسال طلب لـ OpenAI وإرجاع الرد."""
-    history = messages_override or get_history(user_id)
+async def safe_reply(update: Update, text: str):
+    """إرسال رسالة مع fallback إذا فشل Markdown."""
+    # تقسيم الرسائل الطويلة
+    MAX_LEN = 4000
+    chunks = [text[i:i+MAX_LEN] for i in range(0, len(text), MAX_LEN)]
     
-    try:
-        response = await ai.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
-            max_tokens=4096,
-            temperature=0.7,
-        )
-        return response.choices[0].message.content or "لم أتمكن من الرد."
-    except Exception as e:
-        logger.error(f"OpenAI error: {e}")
-        if "api_key" in str(e).lower() or "auth" in str(e).lower():
-            return "❌ مفتاح OPENAI_API_KEY غير صحيح أو غير مضاف في متغيرات البيئة."
-        if "rate_limit" in str(e).lower():
-            return "⏳ وصلنا للحد الأقصى من الطلبات. انتظر لحظة وأعد المحاولة."
-        return f"❌ خطأ في الاتصال بـ OpenAI: {str(e)[:200]}"
-
-
-async def safe_send(update: Update, text: str, parse_mode=ParseMode.MARKDOWN, **kwargs):
-    """إرسال رسالة مع fallback إذا فشل الـ Markdown."""
-    try:
-        await update.message.reply_text(text, parse_mode=parse_mode, **kwargs)
-    except Exception:
+    for chunk in chunks:
         try:
-            # fallback بدون markdown
-            await update.message.reply_text(text, parse_mode=None, **kwargs)
-        except Exception as e:
-            logger.error(f"Failed to send message: {e}")
+            await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            try:
+                await update.message.reply_text(chunk, parse_mode=None)
+            except Exception as e:
+                logger.error(f"Failed to send: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -213,247 +250,179 @@ async def safe_send(update: Update, text: str, parse_mode=ParseMode.MARKDOWN, **
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    name = user.first_name or "صديقي"
-    
-    text = (
+    name = update.effective_user.first_name or "صديقي"
+    await update.message.reply_text(
         f"مرحباً {name}! 👋\n\n"
-        "أنا مساعدك الذكي — أقدر أساعدك في:\n\n"
-        "💻 **البرمجة والكود** — كتابة، مراجعة، إصلاح أخطاء\n"
-        "🔍 **البحث** — أبحث في الإنترنت لك\n"
-        "▶️ **تنفيذ الكود** — أشغّل الكود وأعطيك النتيجة\n"
-        "📄 **تحليل الملفات** — أرسل أي ملف نصي\n"
-        "🖼️ **تحليل الصور** — أرسل صورة وأصفها أو أحللها\n"
-        "💬 **محادثة ذكية** — أتذكر كل المحادثة\n\n"
-        "**أوامر مفيدة:**\n"
-        "/new — محادثة جديدة (مسح الذاكرة)\n"
+        "أنا مساعدك الذكي — بإمكاني:\n\n"
+        "💻 كتابة ومراجعة وإصلاح الكود\n"
+        "▶️ تنفيذ الكود وإرجاع النتيجة\n"
+        "🔍 البحث في الإنترنت\n"
+        "📄 تحليل الملفات المرسلة\n"
+        "🖼️ تحليل وقراءة الصور\n"
+        "💬 تذكر المحادثة كاملاً\n\n"
+        "**أوامر:**\n"
+        "/new — محادثة جديدة\n"
         "/run — تنفيذ كود\n"
-        "/search — بحث في الإنترنت\n"
+        "/search — بحث\n"
         "/help — المساعدة\n\n"
-        "ابدأ بسؤالك الآن! 🚀"
+        "ابدأ بسؤالك! 🚀",
+        parse_mode=ParseMode.MARKDOWN,
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
+    await update.message.reply_text(
         "📖 **دليل الاستخدام**\n\n"
-        "**محادثة عادية:**\n"
-        "فقط اكتب سؤالك أو طلبك مباشرة.\n\n"
-        "**البرمجة:**\n"
-        "• \"اكتب لي كود Python يقرأ ملف CSV\"\n"
-        "• \"راجع هذا الكود: `...`\"\n"
-        "• \"ليش يطلع هذا الخطأ: `...`\"\n\n"
+        "**سؤال عادي:** اكتبه مباشرة\n\n"
         "**تنفيذ كود:**\n"
         "/run python\n"
-        "```python\nprint('مرحبا')\n```\n\n"
+        "```\nprint('مرحبا')\n```\n\n"
         "**بحث:**\n"
-        "/search أحدث إصدار من Python\n\n"
-        "**ملفات وصور:**\n"
-        "أرسل أي ملف نصي (.py, .js, .txt, .json, إلخ) وسأحلله.\n"
-        "أرسل صورة وسأصفها أو أجيب على أسئلتك عنها.\n\n"
-        "**أوامر:**\n"
-        "/new — محادثة جديدة\n"
-        "/history — عدد الرسائل المحفوظة\n"
-        "/model — النموذج المستخدم\n"
+        "/search أحدث إصدار Python\n\n"
+        "**ملف:** أرسل أي ملف نصي (.py .js .json إلخ)\n\n"
+        "**صورة:** أرسل صورة وسأحللها\n\n"
+        "**محادثة جديدة:** /new",
+        parse_mode=ParseMode.MARKDOWN,
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    count = len(get_history(user_id))
-    clear_history(user_id)
-    await update.message.reply_text(
-        f"✅ تم مسح المحادثة ({count} رسالة).\nابدأ محادثة جديدة! 🚀"
-    )
-
-
-async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    count = len(get_history(user_id))
-    await update.message.reply_text(
-        f"💬 عدد الرسائل المحفوظة: **{count}** / {MAX_HISTORY}",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"🤖 النموذج الحالي: `{MODEL}`\n\n"
-        "لتغيير النموذج، أضف `OPENAI_MODEL` في متغيرات Railway.\n"
-        "النماذج المتاحة: `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    count = len(conversations.get(update.effective_user.id, []))
+    clear_history(update.effective_user.id)
+    await update.message.reply_text(f"✅ تم مسح {count} رسالة. ابدأ من جديد! 🚀")
 
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تنفيذ كود مباشر — /run python\\nكود هنا"""
-    text = update.message.text or ""
+    text = (update.message.text or "").strip()
     lines = text.split("\n", 2)
     
     if len(lines) < 2:
         await update.message.reply_text(
-            "📝 **طريقة الاستخدام:**\n\n"
-            "/run python\n"
-            "```python\nprint('مرحبا')\n```\n\n"
-            "اللغات المتاحة: python, javascript, go, rust, java, c++, bash",
+            "📝 **الاستخدام:**\n/run python\n```python\nprint('مرحبا')\n```\n\n"
+            "اللغات: python, javascript, go, rust, java, c++, bash",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
     
-    # استخراج اللغة والكود
-    first_line = lines[0].replace("/run", "").strip()
-    language = first_line or "python"
-    code_part = "\n".join(lines[1:])
+    lang = lines[0].replace("/run", "").strip() or "python"
+    code = re.sub(r"```\w*\n?", "", "\n".join(lines[1:])).strip()
     
-    # تنظيف code blocks
-    code_part = re.sub(r"```\w*\n?", "", code_part).strip()
-    
-    if not code_part:
+    if not code:
         await update.message.reply_text("❌ لم أجد كوداً للتنفيذ.")
         return
     
     await update.message.chat.send_action(ChatAction.TYPING)
-    result = await execute_code(language, code_part)
-    await safe_send(update, result)
+    result = await execute_code(lang, code)
+    await safe_reply(update, result)
 
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بحث في الإنترنت — /search استعلام"""
-    query = update.message.text.replace("/search", "").strip()
+    query = (update.message.text or "").replace("/search", "").strip()
     
     if not query:
-        await update.message.reply_text("🔍 اكتب ما تريد البحث عنه:\n`/search اسم الموضوع`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("🔍 `/search موضوع البحث`", parse_mode=ParseMode.MARKDOWN)
         return
     
     await update.message.chat.send_action(ChatAction.TYPING)
-    result = await web_search(query)
+    search_result = await web_search(query)
     
-    # أرسل نتائج البحث للـ AI لتلخيصها
-    add_message(update.effective_user.id, "user", f"ابحث عن: {query}\n\n{result}")
+    add_message(update.effective_user.id, "user", f"ابحث عن: {query}\n\n{search_result}")
     await update.message.chat.send_action(ChatAction.TYPING)
-    reply = await ask_ai(update.effective_user.id)
+    reply = await ask_gemini(update.effective_user.id)
     add_message(update.effective_user.id, "assistant", reply)
-    
-    await safe_send(update, reply)
+    await safe_reply(update, reply)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  معالج الرسائل النصية الرئيسي
+#  معالج الرسائل النصية
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = (update.message.text or "").strip()
-    
     if not text:
         return
     
-    # تحقق من طلب تنفيذ كود في الرسالة
-    lang, code = detect_code_language(text)
-    run_keywords = ["نفّذ", "شغّل", "run", "execute", "اشغل", "نفذ"]
-    wants_run = any(kw in text.lower() for kw in run_keywords) and code
-    
     await update.message.chat.send_action(ChatAction.TYPING)
     
-    # بحث في الإنترنت إذا طُلب
-    search_keywords = ["ابحث", "search", "اوجد", "أوجد", "latest", "أحدث", "newest"]
-    if any(kw in text.lower() for kw in search_keywords):
-        # استخراج موضوع البحث
-        query = re.sub(r"^(ابحث عن|ابحث|search for|search)\s*", "", text, flags=re.IGNORECASE).strip()
-        if query and len(query) > 3:
-            search_result = await web_search(query)
-            text = f"{text}\n\n[نتائج البحث: {search_result}]"
+    # بحث تلقائي عند الطلب
+    search_kw = ["ابحث", "search", "أحدث", "latest", "newest", "اوجد أحدث"]
+    if any(kw in text.lower() for kw in search_kw):
+        q = re.sub(r"^(ابحث عن|ابحث|search for|search)\s*", "", text, flags=re.IGNORECASE).strip()
+        if q and len(q) > 3:
+            sr = await web_search(q)
+            text = f"{text}\n\n[نتائج البحث: {sr}]"
     
-    # إضافة رسالة المستخدم للتاريخ
     add_message(user_id, "user", text)
-    
-    # الحصول على رد الـ AI
-    reply = await ask_ai(user_id)
+    await update.message.chat.send_action(ChatAction.TYPING)
+    reply = await ask_gemini(user_id)
     add_message(user_id, "assistant", reply)
+    await safe_reply(update, reply)
     
-    # إرسال الرد
-    await safe_send(update, reply)
-    
-    # تنفيذ الكود تلقائياً إذا طُلب
-    if wants_run and lang and code:
+    # تنفيذ تلقائي إذا طُلب
+    run_kw = ["نفّذ", "شغّل", "run", "execute", "اشغل", "نفذ"]
+    lang_match = re.search(r"```(\w+)\n([\s\S]+?)```", text)
+    if any(kw in text.lower() for kw in run_kw) and lang_match:
+        lang, code = lang_match.group(1), lang_match.group(2)
         await update.message.chat.send_action(ChatAction.TYPING)
         exec_result = await execute_code(lang, code)
-        await safe_send(update, exec_result)
+        await safe_reply(update, exec_result)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  معالج الملفات
 # ══════════════════════════════════════════════════════════════════════════════
 
-TEXT_EXTENSIONS = {
+TEXT_EXTS = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
-    ".cpp", ".c", ".h", ".cs", ".rb", ".php", ".swift", ".kt",
+    ".cpp", ".c", ".h", ".cs", ".rb", ".php", ".swift",
     ".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".env",
-    ".html", ".css", ".scss", ".sql", ".sh", ".bash", ".zsh",
-    ".xml", ".csv", ".log", ".dockerfile", ".gitignore",
+    ".html", ".css", ".sql", ".sh", ".bash", ".xml", ".csv",
 }
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     doc = update.message.document
-    
     if not doc:
         return
     
-    filename = doc.file_name or "file"
-    ext = os.path.splitext(filename)[1].lower()
+    fname = doc.file_name or "file"
+    ext = os.path.splitext(fname)[1].lower()
     caption = (update.message.caption or "").strip()
     
     await update.message.chat.send_action(ChatAction.TYPING)
     
-    # تحقق من نوع الملف
-    if ext not in TEXT_EXTENSIONS and doc.file_size and doc.file_size > 50_000:
-        await update.message.reply_text(
-            f"⚠️ الملف `{filename}` كبير جداً أو من نوع غير نصي.\n"
-            "أرسل ملفات نصية (كود، JSON، CSV، إلخ) بحجم أقل من 50KB.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+    if ext not in TEXT_EXTS and (doc.file_size or 0) > 100_000:
+        await update.message.reply_text("⚠️ الملف كبير جداً أو نوعه غير مدعوم. أرسل ملفات نصية أقل من 100KB.")
         return
     
-    # تحميل الملف
     try:
         file = await context.bot.get_file(doc.file_id)
-        file_bytes = await file.download_as_bytearray()
+        raw = await file.download_as_bytearray()
         
-        # محاولة فك التشفير
         try:
-            content = file_bytes.decode("utf-8")
+            content = raw.decode("utf-8")
         except UnicodeDecodeError:
-            try:
-                content = file_bytes.decode("latin-1")
-            except Exception:
-                await update.message.reply_text("❌ لا أستطيع قراءة هذا الملف (ليس نصياً).")
-                return
+            content = raw.decode("latin-1", errors="replace")
         
-        # اقتصار المحتوى
-        if len(content) > 8000:
-            content = content[:8000] + "\n\n... [مقتصر لـ 8000 حرف]"
+        if len(content) > 12000:
+            content = content[:12000] + "\n\n... [مقتصر لـ 12000 حرف]"
         
-        prompt = (
-            f"تحليل الملف: `{filename}`\n\n"
-            f"```\n{content}\n```"
-        )
+        prompt = f"تحليل الملف `{fname}`:\n\n```\n{content}\n```"
         if caption:
-            prompt += f"\n\nملاحظة المستخدم: {caption}"
+            prompt += f"\n\nطلب المستخدم: {caption}"
         else:
-            prompt += "\n\nحلّل هذا الملف وأخبرني عن محتواه، وإذا كان كوداً فراجعه وأشر لأي مشاكل."
+            prompt += "\n\nحلّل هذا الملف. إذا كان كوداً، راجعه وأشر لأي مشاكل أو تحسينات."
         
         add_message(user_id, "user", prompt)
         await update.message.chat.send_action(ChatAction.TYPING)
-        reply = await ask_ai(user_id)
+        reply = await ask_gemini(user_id)
         add_message(user_id, "assistant", reply)
-        await safe_send(update, reply)
-        
+        await safe_reply(update, reply)
+    
     except Exception as e:
-        logger.error(f"File handling error: {e}")
-        await update.message.reply_text(f"❌ خطأ في معالجة الملف: {str(e)[:100]}")
+        logger.error(f"File error: {e}")
+        await update.message.reply_text(f"❌ خطأ في قراءة الملف: {str(e)[:100]}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -462,50 +431,31 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    caption = (update.message.caption or "").strip()
+    caption = (update.message.caption or "صف هذه الصورة بالتفصيل. إذا فيها كود أو نص، اقرأه وحلّله.").strip()
     
     await update.message.chat.send_action(ChatAction.TYPING)
     
     try:
-        # أكبر حجم للصورة
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        
-        # تحميل الصورة كـ bytes
         img_bytes = await file.download_as_bytearray()
-        import base64
         b64 = base64.b64encode(img_bytes).decode()
         
-        question = caption or "صف هذه الصورة بالتفصيل. وإذا كانت تحتوي على كود أو نص، اقرأه وحلّله."
-        
-        # إرسال الصورة لـ GPT-4 Vision
-        messages = get_history(user_id) + [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": question},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            }
+        # Gemini يدعم الصور مباشرة
+        msg_content = [
+            {"type": "text", "text": caption},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
         ]
         
-        response = await ai.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-            max_tokens=2048,
-        )
-        reply = response.choices[0].message.content or "لم أتمكن من تحليل الصورة."
-        
-        add_message(user_id, "user", f"[صورة] {question}")
+        add_message(user_id, "user", msg_content)
+        await update.message.chat.send_action(ChatAction.TYPING)
+        reply = await ask_gemini(user_id)
         add_message(user_id, "assistant", reply)
-        await safe_send(update, reply)
-        
+        await safe_reply(update, reply)
+    
     except Exception as e:
-        logger.error(f"Photo handling error: {e}")
-        if "vision" in str(e).lower() or "image" in str(e).lower():
-            await update.message.reply_text("❌ النموذج الحالي لا يدعم الصور. استخدم `gpt-4o` أو `gpt-4-turbo`.")
-        else:
-            await update.message.reply_text(f"❌ خطأ في معالجة الصورة: {str(e)[:100]}")
+        logger.error(f"Photo error: {e}")
+        await update.message.reply_text(f"❌ خطأ في معالجة الصورة: {str(e)[:100]}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -514,11 +464,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not BOT_TOKEN:
-        raise SystemExit("❌ BOT_TOKEN مفقود — أضفه في متغيرات Railway")
-    if not OPENAI_API_KEY:
-        raise SystemExit("❌ OPENAI_API_KEY مفقود — أضفه في متغيرات Railway")
+        raise SystemExit("❌ TELEGRAM_BOT_TOKEN مفقود")
+    if not GEMINI_KEY:
+        raise SystemExit("❌ GEMINI_API_KEY مفقود")
     
-    logger.info(f"🤖 تشغيل البوت — النموذج: {MODEL}")
+    logger.info(f"🤖 تشغيل البوت | النموذج: {MODEL}")
     
     app = (
         ApplicationBuilder()
@@ -533,16 +483,11 @@ def main():
         .build()
     )
     
-    # أوامر
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(CommandHandler("help",    cmd_help))
     app.add_handler(CommandHandler("new",     cmd_new))
-    app.add_handler(CommandHandler("history", cmd_history))
-    app.add_handler(CommandHandler("model",   cmd_model))
     app.add_handler(CommandHandler("run",     cmd_run))
     app.add_handler(CommandHandler("search",  cmd_search))
-    
-    # رسائل
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
@@ -553,12 +498,12 @@ def main():
         write_timeout=45,
         connect_timeout=45,
         pool_timeout=45,
-        allowed_updates=["message", "callback_query"],
+        allowed_updates=["message"],
     )
 
 
 if __name__ == "__main__":
-    import time as _time
+    import time as _t
     _delay = 5
     while True:
         try:
@@ -566,17 +511,15 @@ if __name__ == "__main__":
         except SystemExit:
             raise
         except Exception as e:
-            err = type(e).__name__
-            if "Conflict" in err:
+            en = type(e).__name__
+            if "Conflict" in en:
                 logger.warning("⚠️ Conflict — انتظار 45 ثانية...")
-                _time.sleep(45)
+                _t.sleep(45)
                 _delay = 5
                 continue
-            logger.critical(f"💥 البوت توقف [{err}]: {e}\n{traceback.format_exc()}")
-            logger.info(f"🔄 إعادة تشغيل بعد {_delay}ث...")
-            _time.sleep(_delay)
+            logger.critical(f"💥 [{en}]: {e}\n{traceback.format_exc()}")
+            _t.sleep(_delay)
             _delay = min(_delay * 2, 30)
         else:
-            logger.warning("⚠️ run_polling انتهى — إعادة التشغيل...")
-            _time.sleep(3)
+            _t.sleep(3)
             _delay = 5
