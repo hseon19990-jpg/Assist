@@ -1,14 +1,18 @@
-/**
- * نقطة الدخول الرئيسية
- */
+'use strict';
+
 require('dotenv').config();
 
 const bot = require('./src/bot');
 
-bot.launch()
-  .then(() => console.log('🤖 البوت يعمل بنجاح!'))
+console.log('🤖 Replit Agent — جاري التشغيل...');
+
+bot.launch({
+  dropPendingUpdates: true,
+  allowedUpdates: ['message', 'callback_query'],
+})
+  .then(() => console.log('✅ البوت يعمل بنجاح!'))
   .catch(err => {
-    console.error('❌ فشل تشغيل البوت:', err.message);
+    console.error('❌ فشل التشغيل:', err.message);
     process.exit(1);
   });
 
