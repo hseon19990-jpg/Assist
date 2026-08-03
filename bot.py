@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GEMINI_KEY  = os.environ.get("GEMINI_API_KEY", "")
 OWNER_ID    = int(os.environ.get("TELEGRAM_OWNER_ID", "0") or 0)
-MODEL       = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-exp")
+MODEL       = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "30"))
 
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
