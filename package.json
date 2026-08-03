@@ -1,10 +1,11 @@
 {
-  "name": "tg-github-bot",
-  "version": "6.0.0",
-  "description": "بوت تيليجرام ذكي لإدارة GitHub باستخدام Groq AI",
+  "name": "tg-replit-agent",
+  "version": "7.0.0",
+  "description": "بوت تيليجرام — Replit Agent: وكيل برمجة ذكي يقرأ ويكتب الكود على GitHub",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",
